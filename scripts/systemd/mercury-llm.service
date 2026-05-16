@@ -1,5 +1,5 @@
 [Unit]
-Description=Mercury Local LLM (Phi-3.5-mini)
+Description=Mercury Local LLM (Qwen2.5-3B-Instruct)
 After=network.target
 PartOf=mercury-agent.service
 
@@ -7,10 +7,10 @@ PartOf=mercury-agent.service
 Type=simple
 User=root
 ExecStart=/opt/mercury/venv/bin/python -m llama_cpp.server \
-  --model /opt/mercury/models/phi-3.5-mini.gguf \
+  --model /opt/mercury/models/qwen2.5-3b-instruct-q4_k_m.gguf \
   --host 127.0.0.1 \
   --port 8089 \
-  --n_ctx 4096 \
+  --n_ctx 8192 \
   --n_threads 4 \
   --chat_format chatml
 Restart=always
