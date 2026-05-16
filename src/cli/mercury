@@ -29,11 +29,12 @@ import urllib.error
 from datetime import datetime, timezone
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-MERCURY_VERSION = "0.3.0"
+MERCURY_VERSION = "0.4.0"
 LND_DIR = "/var/lib/lnd"
 LND_USER = "lnd"
 AGENT_URL = "http://localhost:8088"
 OLLAMA_URL = os.getenv("MERCURY_OLLAMA_URL", "http://10.0.0.79:11434")
+LOCAL_LLM_URL   = os.getenv("MERCURY_LOCAL_LLM_URL", "http://127.0.0.1:8089")
 OLLAMA_MODEL = os.getenv("MERCURY_OLLAMA_MODEL", "qwen2.5:14b")
 
 # ANSI colors
@@ -505,52 +506,40 @@ def cmd_magma(args):
     print(f"{DIM}{'─' * 55}{NC}\n")
 
 
-def cmd_ask(args):
-    question = " ".join(args.question)
-    print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(via DGX Spark — {OLLAMA_MODEL}){NC}")
-    print(f"{DIM}{'─' * 55}{NC}")
-    print(f"  {W}Q:{NC} {question}\n")
-
-    # Gather live node context to give the model real data
-    info, _  = lncli("getinfo")
-    wallet, _ = lncli("walletbalance")
+def _build_node_context():
+    """Collect live node telemetry for AI context."""
+    info, _     = lncli("getinfo")
+    wallet, _   = lncli("walletbalance")
     channels, _ = lncli("listchannels")
     pending, _  = lncli("pendingchannels")
-
-    node_ctx = ""
+    ctx = ""
     if info:
-        node_ctx += f"Node alias: {info.get('alias')}\n"
-        node_ctx += f"Block height: {info.get('block_height')}, synced: {info.get('synced_to_chain')}\n"
-        node_ctx += f"Active channels: {info.get('num_active_channels')}, pending: {info.get('num_pending_channels')}\n"
+        ctx += f"Node alias: {info.get('alias')}\n"
+        ctx += f"Block height: {info.get('block_height')}, synced: {info.get('synced_to_chain')}\n"
+        ctx += f"Active channels: {info.get('num_active_channels')}, pending: {info.get('num_pending_channels')}\n"
     if wallet:
-        node_ctx += f"Wallet: {wallet.get('confirmed_balance')} SAT confirmed, {wallet.get('unconfirmed_balance')} SAT pending\n"
+        ctx += f"Wallet: {wallet.get('confirmed_balance')} SAT confirmed, {wallet.get('unconfirmed_balance')} SAT pending\n"
     if channels:
         for c in channels.get("channels", []):
             local = int(c["local_balance"])
             cap   = int(c["capacity"])
             pct   = round(local/cap*100, 1) if cap else 0
-            node_ctx += f"Channel: local {local} SAT / capacity {cap} SAT ({pct}% local)\n"
+            ctx += f"Channel: local {local} SAT / capacity {cap} SAT ({pct}% local)\n"
     if pending:
         for p in pending.get("pending_open_channels", []):
             ch = p.get("channel", {})
-            node_ctx += f"Pending channel: {ch.get('local_balance')} SAT / {ch.get('capacity')} SAT (awaiting confirmation)\n"
+            ctx += f"Pending channel: {ch.get('local_balance')} SAT / {ch.get('capacity')} SAT (awaiting confirmation)\n"
+    return ctx
 
-    system_prompt = (
-        "You are Mercury, an AI agent living inside a sovereign Bitcoin Lightning node "
-        "operated by Human Value Exchange (HVE). You have real-time access to the node's "
-        "telemetry. Answer questions concisely and practically. "
-        "Always think in SATs. Recommend actions when useful but always note that "
-        "human approval is required before any funds move. "
-        "Current node data:\n" + node_ctx
-    )
 
+def _ask_dgx(question, system_prompt):
+    """Stream answer from DGX Ollama. Returns True on success, False if unreachable."""
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "prompt": question,
         "system": system_prompt,
         "stream": True,
     }).encode()
-
     try:
         req = urllib.request.Request(
             f"{OLLAMA_URL}/api/generate",
@@ -562,14 +551,89 @@ def cmd_ask(args):
         with urllib.request.urlopen(req, timeout=60) as r:
             for line in r:
                 chunk = json.loads(line.decode())
-                token = chunk.get("response", "")
-                print(token, end="", flush=True)
+                print(chunk.get("response", ""), end="", flush=True)
                 if chunk.get("done"):
                     break
         print(f"\n")
+        return True
+    except urllib.error.URLError:
+        return False
+
+
+def _ask_local(question, system_prompt):
+    """Stream answer from local Phi-3.5-mini via llama.cpp OpenAI-compatible server."""
+    payload = json.dumps({
+        "model": "phi-3.5-mini",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": question},
+        ],
+        "stream": True,
+        "max_tokens": 512,
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            f"{LOCAL_LLM_URL}/v1/chat/completions",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        print(f"  {G}A:{NC} ", end="", flush=True)
+        with urllib.request.urlopen(req, timeout=120) as r:
+            for line in r:
+                line = line.decode().strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    print(token, end="", flush=True)
+                except (json.JSONDecodeError, IndexError, KeyError):
+                    pass
+        print(f"\n")
+        return True
     except urllib.error.URLError as e:
-        print(f"\n  {R}DGX Ollama unreachable ({OLLAMA_URL}): {e}{NC}")
-        print(f"  {DIM}Set MERCURY_OLLAMA_URL env var if DGX is on a different address.{NC}\n")
+        print(f"\n  {R}Local LLM also unreachable: {e}{NC}")
+        print(f"  {DIM}Start it with: sudo systemctl start mercury-llm{NC}\n")
+        return False
+
+
+def cmd_ask(args):
+    question = " ".join(args.question)
+    node_ctx = _build_node_context()
+    system_prompt = (
+        "You are Mercury, an AI agent living inside a sovereign Bitcoin Lightning node "
+        "operated by Human Value Exchange (HVE). You have real-time access to the node's "
+        "telemetry. Answer concisely and practically. Always think in SATs. "
+        "Recommend actions when useful but note that human approval is required before any funds move.\n"
+        "Current node data:\n" + node_ctx
+    )
+
+    # Try DGX Spark first (fast, powerful)
+    dgx_ok = False
+    try:
+        urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3)
+        dgx_ok = True
+    except urllib.error.URLError:
+        pass
+
+    if dgx_ok:
+        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(DGX Spark — {OLLAMA_MODEL}){NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        print(f"  {W}Q:{NC} {question}\n")
+        if _ask_dgx(question, system_prompt):
+            return
+
+    # Fall back to local Phi-3.5-mini on Pi
+    print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — Phi-3.5-mini){NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  {W}Q:{NC} {question}\n")
+    if not dgx_ok:
+        print(f"  {Y}DGX unreachable — using local Phi-3.5-mini{NC}\n")
+    _ask_local(question, system_prompt)
 
 
 def cmd_version(args):

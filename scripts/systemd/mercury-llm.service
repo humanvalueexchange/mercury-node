@@ -1,0 +1,22 @@
+[Unit]
+Description=Mercury Local LLM (Phi-3.5-mini)
+After=network.target
+PartOf=mercury-agent.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/mercury/venv/bin/python -m llama_cpp.server \
+  --model /opt/mercury/models/phi-3.5-mini.gguf \
+  --host 127.0.0.1 \
+  --port 8089 \
+  --n_ctx 4096 \
+  --n_threads 4 \
+  --chat_format chatml
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
