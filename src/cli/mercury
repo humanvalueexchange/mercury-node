@@ -1088,7 +1088,7 @@ def cmd_shell(args=None):
         if line.lower() == "help":
             print(f"\n  {W}Commands:{NC}  status  channels  invoices  sync  peers  backup  logs")
             print(f"             pay <bolt11>  invoice <sat> [memo]")
-            print(f"             magma [offers|score|recommend]  version  exit")
+            print(f"             magma [offers|score|recommend]  health  version  exit")
             print(f"  {W}Or just type naturally{NC} — anything else goes to Mercury AI.\n")
             continue
 
@@ -1096,6 +1096,10 @@ def cmd_shell(args=None):
             parts = shlex.split(line)
         except ValueError:
             parts = line.split()
+
+        # Allow "mercury <cmd>" prefix inside the shell
+        if parts and parts[0].lower() == "mercury" and len(parts) > 1:
+            parts = parts[1:]
 
         cmd = parts[0].lower() if parts else ""
         rest = parts[1:]
