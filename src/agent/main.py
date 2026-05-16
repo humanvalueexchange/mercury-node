@@ -58,7 +58,8 @@ app.add_middleware(
 
 def lncli(*args, timeout=15):
     """Run lncli and return parsed JSON or raise HTTPException."""
-    cmd = ["sudo", "-u", LND_USER, "lncli", f"--lnddir={LND_DIR}"] + list(args)
+    # Service runs as lnd user — call lncli directly (no sudo needed)
+    cmd = ["lncli", f"--lnddir={LND_DIR}"] + list(args)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
@@ -273,30 +274,51 @@ async def magma_query(query: str, variables: dict = None):
 async def get_magma_offers(min_sat: int = 100000, max_sat: int = 5000000):
     """
     Fetch live inbound liquidity offers from Magma marketplace.
-    Returns offers sized between min_sat and max_sat.
     Anonymous access — no API key required.
     """
     query = """
-    query GetOffers($minSize: Float, $maxSize: Float) {
-      getOffers(where: { min_channel_size: { gte: $minSize }, max_channel_size: { lte: $maxSize } }) {
-        id
-        node_pubkey
-        min_channel_size
-        max_channel_size
-        base_fee
-        fee_rate
-        min_block_length
-        order_quantity
-        status
+    {
+      market {
+        offer {
+          offers {
+            total
+            list {
+              id
+              status
+              total_amount { satoshi { sats } }
+              fees { fixed { sats } variable { sats } }
+              node { alias }
+            }
+          }
+        }
       }
     }
     """
     try:
-        data = await magma_query(query, {"minSize": min_sat, "maxSize": max_sat})
-        offers = data.get("getOffers", [])
+        data = await magma_query(query)
+        raw = data.get("market", {}).get("offer", {}).get("offers", {})
+        all_offers = raw.get("list", [])
+        def offer_size(o):
+            try:
+                return int(o["total_amount"]["satoshi"]["sats"])
+            except (TypeError, KeyError):
+                return 0
+
+        filtered = [o for o in all_offers if min_sat <= offer_size(o) <= max_sat]
         return {
-            "offers": offers,
-            "count": len(offers),
+            "offers": [
+                {
+                    "id": o["id"],
+                    "status": o["status"],
+                    "size_sat": offer_size(o),
+                    "fee_fixed_sat": int((o.get("fees") or {}).get("fixed", {}).get("sats", 0) or 0),
+                    "fee_variable_sat": int((o.get("fees") or {}).get("variable", {}).get("sats", 0) or 0),
+                    "node_alias": (o.get("node") or {}).get("alias", "unknown"),
+                }
+                for o in filtered
+            ],
+            "count": len(filtered),
+            "total_market": raw.get("total", 0),
             "filter": {"min_sat": min_sat, "max_sat": max_sat},
             "note": "anonymous_access" if not MAGMA_API_KEY else "authenticated",
         }
@@ -307,38 +329,34 @@ async def get_magma_offers(min_sat: int = 100000, max_sat: int = 5000000):
 @app.get("/api/magma/node-score")
 async def get_magma_node_score():
     """
-    Fetch HVE-Mercury's Amboss node health score and reputation metrics.
-    Requires our pubkey — uses node info from LND getinfo.
+    Fetch HVE-Mercury's visibility and info on the Amboss graph.
     """
-    info, _ = lncli("getinfo"), None
-    info = lncli("getinfo")[0]
+    info = lncli("getinfo")
     if not info:
         raise HTTPException(status_code=503, detail="LND unavailable")
     pubkey = info.get("identity_pubkey")
 
     query = """
-    query GetNodeScore($pubkey: String!) {
-      getNode(pubkey: $pubkey) {
-        alias
-        capacity
-        channel_count
-        amboss_health {
-          score
-          grade
-          last_update
+    query GetNodeInfo($uri: String!) {
+      node {
+        node_info(connection_uri: $uri) {
+          pubkey
+          visible_in_graph
+          amboss { min_channel_size }
         }
       }
     }
     """
     try:
-        data = await magma_query(query, {"pubkey": pubkey})
-        node = data.get("getNode", {})
+        data = await magma_query(query, {"uri": pubkey})
+        node = data.get("node", {}).get("node_info", {})
+        amboss = node.get("amboss", {}) or {}
         return {
             "pubkey": pubkey,
-            "alias": node.get("alias"),
-            "capacity_sat": node.get("capacity"),
-            "channel_count": node.get("channel_count"),
-            "health": node.get("amboss_health", {}),
+            "alias": info.get("alias"),
+            "visible_in_graph": node.get("visible_in_graph", False),
+            "min_channel_size_sat": amboss.get("min_channel_size"),
+            "note": "Claim node on amboss.space to unlock full score + profile" if not node.get("visible_in_graph") else "Node visible in graph",
         }
     except httpx.HTTPError as e:
         raise HTTPException(status_code=503, detail=f"Magma unreachable: {e}")
@@ -347,36 +365,58 @@ async def get_magma_node_score():
 @app.get("/api/magma/recommend")
 async def get_magma_recommendations():
     """
-    Pull Magma AI channel recommendations for our node.
-    Returns top peers to open channels with for optimal routing position.
-    Read-only intelligence — human approval required before any action.
+    Return top Magma offers as channel recommendations, sorted by fee efficiency.
+    Human approval required before any action.
     """
-    info = lncli("getinfo")[0]
+    info = lncli("getinfo")
     if not info:
         raise HTTPException(status_code=503, detail="LND unavailable")
-    pubkey = info.get("identity_pubkey")
 
     query = """
-    query GetRecommendations($pubkey: String!) {
-      getNodeRecommendations(pubkey: $pubkey) {
-        node_pubkey
-        alias
-        score
-        reason
-        suggested_size_sat
-        expected_routing_volume_sat
+    {
+      market {
+        offer {
+          offers {
+            total
+            list {
+              id
+              status
+              total_amount { satoshi { sats } }
+              fees { fixed { sats } variable { sats } }
+              node { alias }
+            }
+          }
+        }
       }
     }
     """
     try:
-        data = await magma_query(query, {"pubkey": pubkey})
-        recs = data.get("getNodeRecommendations", [])
+        data = await magma_query(query)
+        raw = data.get("market", {}).get("offer", {}).get("offers", {})
+        offers = [o for o in raw.get("list", []) if o["status"] == "ENABLED"]
+        # Sort by variable fee (ppm) ascending — best routing value first
+        def fee_ppm(o):
+            try:
+                size = int(o["total_amount"]["satoshi"]["sats"])
+                var = int(o["fees"]["variable"]["sats"])
+                return round(var / size * 1_000_000) if size > 0 else 999999
+            except (TypeError, KeyError, ZeroDivisionError):
+                return 999999
+        offers_sorted = sorted(offers, key=fee_ppm)[:10]
         return {
-            "pubkey": pubkey,
-            "recommendations": recs,
-            "count": len(recs),
+            "recommendations": [
+                {
+                    "node_alias": o.get("node", {}).get("alias", "unknown"),
+                    "offer_id": o["id"],
+                    "size_sat": int(o["total_amount"]["satoshi"]["sats"]),
+                    "fee_fixed_sat": int(o["fees"]["fixed"]["sats"]),
+                    "fee_variable_ppm": fee_ppm(o),
+                }
+                for o in offers_sorted
+            ],
+            "count": len(offers_sorted),
             "action_required": "human_approval",
-            "note": "READ-ONLY — recommendations only, no channels opened automatically",
+            "note": "READ-ONLY — sorted by lowest fee rate. Human approval required before purchasing.",
         }
     except httpx.HTTPError as e:
         raise HTTPException(status_code=503, detail=f"Magma unreachable: {e}")
