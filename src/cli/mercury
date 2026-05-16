@@ -608,11 +608,28 @@ def cmd_ask(args):
         "You are Mercury, an AI agent living inside a sovereign Bitcoin Lightning node "
         "operated by Human Value Exchange (HVE). You have real-time access to the node's "
         "telemetry. Answer concisely and practically. Always think in SATs. "
+        "You run locally on a Raspberry Pi 5 with a Hailo-8L AI accelerator using the "
+        "Phi-3.5-mini model. You are self-contained and do not depend on any external system. "
         "Recommend actions when useful but note that human approval is required before any funds move.\n"
         "Current node data:\n" + node_ctx
     )
 
-    # Try DGX Spark first (fast, powerful)
+    # Try local Phi-3.5-mini first (sovereign, no external dependency)
+    local_ok = False
+    try:
+        urllib.request.urlopen(f"{LOCAL_LLM_URL}/v1/models", timeout=2)
+        local_ok = True
+    except urllib.error.URLError:
+        pass
+
+    if local_ok:
+        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — Phi-3.5-mini){NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        print(f"  {W}Q:{NC} {question}\n")
+        if _ask_local(question, system_prompt):
+            return
+
+    # Fall back to DGX Spark if local is unavailable
     dgx_ok = False
     try:
         urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3)
@@ -624,16 +641,12 @@ def cmd_ask(args):
         print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(DGX Spark — {OLLAMA_MODEL}){NC}")
         print(f"{DIM}{'─' * 55}{NC}")
         print(f"  {W}Q:{NC} {question}\n")
-        if _ask_dgx(question, system_prompt):
-            return
+        print(f"  {Y}Local AI unavailable — using DGX Spark{NC}\n")
+        _ask_dgx(question, system_prompt)
+        return
 
-    # Fall back to local Phi-3.5-mini on Pi
-    print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — Phi-3.5-mini){NC}")
-    print(f"{DIM}{'─' * 55}{NC}")
-    print(f"  {W}Q:{NC} {question}\n")
-    if not dgx_ok:
-        print(f"  {Y}DGX unreachable — using local Phi-3.5-mini{NC}\n")
-    _ask_local(question, system_prompt)
+    print(f"\n  {R}Mercury AI unavailable — local LLM and DGX both unreachable{NC}")
+    print(f"  {DIM}sudo systemctl start mercury-llm{NC}\n")
 
 
 def cmd_health(args):
@@ -1034,7 +1047,7 @@ def cmd_shell(args=None):
 
     COMMANDS = {"status", "channels", "invoices", "sync", "peers",
                 "backup", "logs", "pay", "invoice", "magma", "health",
-                "version", "help", "exit", "quit"}
+                "version", "help", "exit", "quit", "clear", "cls"}
 
     dispatch = {
         "status":   cmd_status,
@@ -1084,6 +1097,10 @@ def cmd_shell(args=None):
         if line.lower() in ("exit", "quit", "bye"):
             print(f"\n{DIM}Goodbye.{NC}\n")
             break
+
+        if line.lower() in ("clear", "cls"):
+            os.system("clear")
+            continue
 
         if line.lower() == "help":
             print(f"\n  {W}Commands:{NC}  status  channels  invoices  sync  peers  backup  logs")
