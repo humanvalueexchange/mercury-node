@@ -441,20 +441,22 @@ def cmd_magma(args):
             return
         offers = data.get("offers", [])
         note = data.get("note", "")
-        print(f"  {DIM}Access: {note}  |  {data.get('count', 0)} offers{NC}\n")
+        total = data.get("total_market", data.get("count", 0))
+        print(f"  {DIM}Access: {note}  |  {total} total offers  |  {data.get('count', 0)} in range{NC}\n")
         if not offers:
             print(f"  {Y}No offers in current size range.{NC}")
-            print(f"  {DIM}Try: mercury magma offers --min 50000 --max 10000000{NC}")
+            print(f"  {DIM}Try: mercury magma offers --min 50000 --max 100000000{NC}")
         else:
             for o in offers[:10]:
-                size_min = int(o.get("min_channel_size", 0))
-                size_max = int(o.get("max_channel_size", 0))
-                fee_rate = o.get("fee_rate", "?")
-                base_fee = o.get("base_fee", "?")
-                status   = o.get("status", "")
-                dot = G if status == "OPEN" else Y
-                print(f"  {dot}●{NC} {fmt_sat(size_min)} – {fmt_sat(size_max)}  "
-                      f"fee {fee_rate} ppm  base {base_fee} mSat  {DIM}{status}{NC}")
+                size     = int(o.get("size_sat", 0))
+                fee_var  = int(o.get("fee_variable_sat", 0))
+                fee_fix  = int(o.get("fee_fixed_sat", 0))
+                ppm      = round(fee_var / size * 1_000_000) if size > 0 else 0
+                alias    = o.get("node_alias", "unknown")
+                status   = o.get("status", "ENABLED")
+                dot = G if status == "ENABLED" else Y
+                print(f"  {dot}●{NC} {W}{fmt_sat(size)}{NC}  "
+                      f"{DIM}{ppm} ppm  base {fee_fix} sat  {alias}{NC}")
 
     elif subcmd == 'score':
         print(f"\n{W}Magma — HVE-Mercury Node Score{NC}")
@@ -463,25 +465,21 @@ def cmd_magma(args):
         if err:
             print(f"  {R}Agent unavailable: {err}{NC}\n")
             return
-        health = data.get("health", {})
-        score  = health.get("score", "N/A")
-        grade  = health.get("grade", "N/A")
-        cap    = data.get("capacity_sat")
-        chans  = data.get("channel_count")
+        visible = data.get("visible_in_graph", False)
+        min_ch  = data.get("min_channel_size_sat")
         print(f"  Alias:    {W}{data.get('alias', 'HVE-Mercury')}{NC}")
-        if cap:
-            print(f"  Capacity: {W}{fmt_sat(cap)}{NC}")
-        if chans is not None:
-            print(f"  Channels: {W}{chans}{NC}")
-        if score != "N/A":
-            color = G if float(score) >= 70 else Y if float(score) >= 40 else R
-            print(f"  Score:    {color}{score} / 100  grade {grade}{NC}")
+        print(f"  Pubkey:   {DIM}{data.get('pubkey', '')[:40]}...{NC}")
+        if visible:
+            print(f"  Graph:    {G}Visible ✅{NC}")
+            if min_ch:
+                print(f"  Min chan: {W}{fmt_sat(int(min_ch))}{NC}")
         else:
-            print(f"  {Y}Score not yet available — claim node on amboss.space first{NC}")
-            print(f"  {DIM}amboss.space/node/0206c9ccd47c19f4833a5cbe7c6990eb5d6678045d7bb508c0c6fda50e6b43ee14{NC}")
+            print(f"  Graph:    {Y}Not yet visible — channel pending confirmation{NC}")
+            print(f"  {DIM}{data.get('note', '')}{NC}")
+            print(f"  {DIM}amboss.space/node/{data.get('pubkey', '')}{NC}")
 
     elif subcmd == 'recommend':
-        print(f"\n{W}Magma — AI Channel Recommendations{NC}")
+        print(f"\n{W}Magma — Best Inbound Liquidity Offers{NC}")
         print(f"{DIM}{'─' * 55}{NC}")
         data, err = _agent_get("/api/magma/recommend")
         if err:
@@ -490,18 +488,15 @@ def cmd_magma(args):
         recs = data.get("recommendations", [])
         if not recs:
             print(f"  {Y}No recommendations yet.{NC}")
-            print(f"  {DIM}Recommendations improve as your node builds history on the graph.{NC}")
         else:
+            print(f"  {DIM}Sorted by lowest fee rate (best value first){NC}\n")
             for r in recs:
-                alias   = r.get("alias", r.get("node_pubkey", "")[:16] + "...")
-                score   = r.get("score", "")
-                reason  = r.get("reason", "")
-                size    = r.get("suggested_size_sat", 0)
-                print(f"  {G}→{NC} {W}{alias}{NC}  score {score}")
-                if size:
-                    print(f"     Suggested size: {fmt_sat(size)}")
-                if reason:
-                    print(f"     {DIM}{reason}{NC}")
+                alias   = r.get("node_alias", "unknown")
+                size    = int(r.get("size_sat", 0))
+                ppm     = r.get("fee_variable_ppm", 0)
+                fix_sat = int(r.get("fee_fixed_sat", 0))
+                print(f"  {G}→{NC} {W}{alias}{NC}")
+                print(f"     {fmt_sat(size)}  |  {ppm} ppm  base {fix_sat} sat")
         print(f"\n  {Y}⚠  READ-ONLY — human approval required before opening channels{NC}")
     else:
         print(f"{R}Unknown magma subcommand: {subcmd}{NC}")
@@ -585,6 +580,90 @@ def cmd_version(args):
     print(f"  Python        {sys.version.split()[0]}\n")
 
 
+def cmd_shell(args=None):
+    """Interactive Mercury REPL — type commands without the 'mercury' prefix."""
+    import shlex
+    print(f"\n{W}Mercury Node — Interactive Shell{NC}  {DIM}(type 'exit' or Ctrl+D to quit){NC}")
+    print(f"{DIM}Commands: status channels invoices sync peers backup logs pay invoice magma ask version{NC}\n")
+
+    dispatch = {
+        "status":   cmd_status,
+        "channels": cmd_channels,
+        "invoices": cmd_invoices,
+        "sync":     cmd_sync,
+        "peers":    cmd_peers,
+        "backup":   cmd_backup,
+        "logs":     cmd_logs,
+        "pay":      cmd_pay,
+        "invoice":  cmd_invoice,
+        "magma":    cmd_magma,
+        "ask":      cmd_ask,
+        "version":  cmd_version,
+        "help":     None,
+        "exit":     None,
+        "quit":     None,
+    }
+
+    while True:
+        try:
+            line = input(f"{G}mercury{NC}> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line:
+            continue
+        if line in ("exit", "quit"):
+            break
+        if line == "help":
+            print(f"  {DIM}status channels invoices sync peers backup logs pay invoice magma ask version exit{NC}")
+            continue
+        try:
+            parts = shlex.split(line)
+        except ValueError as e:
+            print(f"  {R}Parse error: {e}{NC}")
+            continue
+        cmd = parts[0]
+        if cmd not in dispatch or dispatch[cmd] is None:
+            print(f"  {R}Unknown command: {cmd}{NC}  (type 'help' for list)")
+            continue
+        # Build a minimal namespace for the command
+        ns = argparse.Namespace(command=cmd)
+        rest = parts[1:]
+        # Parse sub-args per command
+        try:
+            if cmd == "ask":
+                ns.question = rest if rest else []
+                if not ns.question:
+                    print(f"  {Y}Usage: ask <question>{NC}")
+                    continue
+            elif cmd == "invoices":
+                ns.last = int(rest[0]) if rest else 10
+            elif cmd == "logs":
+                ns.service = rest[0] if rest else "lnd"
+            elif cmd == "pay":
+                if not rest:
+                    print(f"  {Y}Usage: pay <bolt11>{NC}")
+                    continue
+                ns.bolt11 = rest[0]
+            elif cmd == "invoice":
+                if not rest:
+                    print(f"  {Y}Usage: invoice <sat> [memo]{NC}")
+                    continue
+                ns.sat = int(rest[0])
+                ns.memo = " ".join(rest[1:]) if len(rest) > 1 else ""
+            elif cmd == "magma":
+                ns.subcmd = rest[0] if rest else "offers"
+                ns.min_sat = 100000
+                ns.max_sat = 5000000
+        except (ValueError, IndexError) as e:
+            print(f"  {R}Argument error: {e}{NC}")
+            continue
+        try:
+            dispatch[cmd](ns)
+        except KeyboardInterrupt:
+            print()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -595,6 +674,7 @@ def main():
     )
     sub = parser.add_subparsers(dest="command")
 
+    sub.add_parser("shell",    help="Interactive shell (no 'mercury' prefix needed)")
     sub.add_parser("status",   help="Node health at a glance")
     sub.add_parser("sync",     help="Bitcoin sync progress")
     sub.add_parser("peers",    help="Connected peers")
@@ -642,7 +722,12 @@ def main():
         "magma":    cmd_magma,
         "ask":      cmd_ask,
         "version":  cmd_version,
+        "shell":    cmd_shell,
     }
+
+    if args.command is None:
+        cmd_shell()
+        return
 
     if args.command in dispatch:
         try:
