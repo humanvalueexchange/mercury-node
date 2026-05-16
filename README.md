@@ -5,8 +5,11 @@
 Buy a Raspberry Pi 5 (16GB) + Hailo-8L Hat. Run one command. Get a fully sovereign, AI-powered Bitcoin node with an intelligent agent living inside it — working for you 24/7.
 
 ```bash
-curl -fsSL https://mercury-node.dev/install | bash
+curl -fsSL https://get.mercury-node.dev/install | bash
 ```
+
+> No cloud. No KYC. No counterparty.  
+> Just your own AI-powered Bitcoin & Lightning node that actually talks back to you.
 
 ---
 
@@ -28,7 +31,7 @@ Channels  3 active | avg balance 54%
 Uptime    14 days, 6 hours
 ─────────────────────────────────────
 
-$ mercury ask "how are my channels?"
+$ mercury ask "should I rebalance any channels right now?"
 
 Your ACINQ channel is well-balanced at 58% local.
 Your WoS channel is getting low at 18% — recommend
@@ -80,7 +83,7 @@ Enable SSH in the imager settings. Boot your Pi.
 ### 2. Run the installer
 SSH into your Pi and run:
 ```bash
-curl -fsSL https://mercury-node.dev/install | bash
+curl -fsSL https://get.mercury-node.dev/install | bash
 ```
 
 The installer will:
@@ -179,9 +182,12 @@ Our production Mercury node has been running since 2026. This code runs our trea
 
 ## Contributing
 
-Mercury Node is currently in private development. Public launch coming Q3 2026.
+Mercury Node is currently in private development. **Public launch targeted for July 2026.**
 
-Star this repo to be notified at launch.
+⭐ **Star this repo to be notified at launch.**
+
+📬 **[Join the early access waitlist →](https://mercury-node.dev/waitlist)**  
+Be the first to know when Mercury Node ships. First 100 nodes get dedicated onboarding support.
 
 ---
 
