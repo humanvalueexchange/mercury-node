@@ -1,0 +1,33 @@
+[Unit]
+Description=Mercury Agent API Service
+Documentation=https://github.com/HansHWestphal/mercury-node
+After=network-online.target lnd.service
+Requires=lnd.service
+
+[Service]
+Type=simple
+User=lnd
+Group=lnd
+WorkingDirectory=/opt/mercury/agent
+ExecStart=/opt/mercury/venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Never take down Bitcoin stack if agent crashes
+KillMode=control-group
+TimeoutStopSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mercury-agent
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mercury /var/lib/lnd
+
+[Install]
+WantedBy=multi-user.target
