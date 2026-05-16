@@ -645,10 +645,15 @@ def cmd_version(args):
 
 
 def cmd_shell(args=None):
-    """Interactive Mercury REPL — type commands without the 'mercury' prefix."""
+    """
+    Interactive Mercury session.
+    Type naturally — anything that isn't a command is sent to Mercury AI.
+    Commands: status channels invoices sync peers backup logs pay invoice magma version exit
+    """
     import shlex
-    print(f"\n{W}Mercury Node — Interactive Shell{NC}  {DIM}(type 'exit' or Ctrl+D to quit){NC}")
-    print(f"{DIM}Commands: status channels invoices sync peers backup logs pay invoice magma ask version{NC}\n")
+
+    COMMANDS = {"status", "channels", "invoices", "sync", "peers",
+                "backup", "logs", "pay", "invoice", "magma", "version", "help", "exit", "quit"}
 
     dispatch = {
         "status":   cmd_status,
@@ -661,46 +666,74 @@ def cmd_shell(args=None):
         "pay":      cmd_pay,
         "invoice":  cmd_invoice,
         "magma":    cmd_magma,
-        "ask":      cmd_ask,
         "version":  cmd_version,
-        "help":     None,
-        "exit":     None,
-        "quit":     None,
     }
+
+    # Show brief status on entry
+    print(f"\n{C}⚡ Mercury Node  v{MERCURY_VERSION}{NC}  {DIM}— sovereign Bitcoin Lightning node{NC}")
+    print(f"{DIM}Type naturally to talk to Mercury AI, or use commands: status channels magma invoices ...{NC}")
+    print(f"{DIM}Type 'exit' or press Ctrl+D to quit.{NC}\n")
+
+    # Quick status flash on entry
+    try:
+        data, err = _agent_get("/api/status")
+        if data and not err:
+            wallet = data.get("wallet", {})
+            chans  = data.get("channels", {})
+            bal    = wallet.get("confirmed_sat", 0)
+            active = chans.get("active", 0)
+            pending = chans.get("pending", 0)
+            block  = data.get("node", {}).get("block_height", "?")
+            chan_str = f"{active} active" + (f", {pending} pending" if pending else "")
+            print(f"  {G}●{NC} {W}{fmt_sat(bal)}{NC}  |  {chan_str}  |  block {block}\n")
+    except Exception:
+        pass
 
     while True:
         try:
-            line = input(f"{G}mercury{NC}> ").strip()
+            line = input(f"{G}⚡{NC} ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            print(f"\n{DIM}Goodbye.{NC}\n")
             break
+
         if not line:
             continue
-        if line in ("exit", "quit"):
+
+        if line.lower() in ("exit", "quit", "bye"):
+            print(f"\n{DIM}Goodbye.{NC}\n")
             break
-        if line == "help":
-            print(f"  {DIM}status channels invoices sync peers backup logs pay invoice magma ask version exit{NC}")
+
+        if line.lower() == "help":
+            print(f"\n  {W}Commands:{NC}  status  channels  invoices  sync  peers  backup  logs")
+            print(f"             pay <bolt11>  invoice <sat> [memo]")
+            print(f"             magma [offers|score|recommend]  version  exit")
+            print(f"  {W}Or just type naturally{NC} — anything else goes to Mercury AI.\n")
             continue
+
         try:
             parts = shlex.split(line)
-        except ValueError as e:
-            print(f"  {R}Parse error: {e}{NC}")
-            continue
-        cmd = parts[0]
-        if cmd not in dispatch or dispatch[cmd] is None:
-            print(f"  {R}Unknown command: {cmd}{NC}  (type 'help' for list)")
-            continue
-        # Build a minimal namespace for the command
-        ns = argparse.Namespace(command=cmd)
+        except ValueError:
+            parts = line.split()
+
+        cmd = parts[0].lower() if parts else ""
         rest = parts[1:]
-        # Parse sub-args per command
+
+        if cmd not in COMMANDS:
+            # Natural language → AI
+            ns = argparse.Namespace(question=line.split())
+            try:
+                cmd_ask(ns)
+            except KeyboardInterrupt:
+                print()
+            continue
+
+        if cmd in ("exit", "quit"):
+            print(f"\n{DIM}Goodbye.{NC}\n")
+            break
+
+        ns = argparse.Namespace(command=cmd)
         try:
-            if cmd == "ask":
-                ns.question = rest if rest else []
-                if not ns.question:
-                    print(f"  {Y}Usage: ask <question>{NC}")
-                    continue
-            elif cmd == "invoices":
+            if cmd == "invoices":
                 ns.last = int(rest[0]) if rest else 10
             elif cmd == "logs":
                 ns.service = rest[0] if rest else "lnd"
@@ -722,6 +755,7 @@ def cmd_shell(args=None):
         except (ValueError, IndexError) as e:
             print(f"  {R}Argument error: {e}{NC}")
             continue
+
         try:
             dispatch[cmd](ns)
         except KeyboardInterrupt:
