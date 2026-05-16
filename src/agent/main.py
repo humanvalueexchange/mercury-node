@@ -1,18 +1,22 @@
 """
-Mercury Agent — v0.2
-FastAPI service exposing Mercury node status for the AI agent layer (Phi-3.5-mini / Ollama).
+Mercury Agent — v0.3
+FastAPI service exposing Mercury node status + Magma liquidity intelligence for the AI agent layer.
 
 Endpoints:
-  GET  /api/status       Full node health snapshot
-  GET  /api/channels     Active + pending channel data
-  GET  /api/invoices     Recent payments
-  GET  /api/sync         Bitcoin sync progress
-  GET  /api/peers        Connected Lightning peers
-  POST /api/backup       Trigger static channel backup
-  GET  /health           Liveness check (for systemd / load balancer)
+  GET  /api/status            Full node health snapshot
+  GET  /api/channels          Active + pending channel data
+  GET  /api/invoices          Recent payments
+  GET  /api/sync              Bitcoin sync progress
+  GET  /api/peers             Connected Lightning peers
+  POST /api/backup            Trigger static channel backup
+  GET  /api/magma/offers      Live Magma inbound liquidity offers
+  GET  /api/magma/node-score  Our node's Amboss health/reputation score
+  GET  /api/magma/recommend   AI-powered channel recommendations for our pubkey
+  GET  /health                Liveness check (for systemd / load balancer)
 
 This service runs as user 'lnd' so it can read LND macaroons.
-It is intentionally READ-ONLY — it never signs transactions or moves funds.
+Node operations are READ-ONLY — it never signs transactions or moves funds.
+Magma read access is anonymous — no API key required to start.
 """
 
 import json
@@ -26,13 +30,16 @@ try:
     from fastapi import FastAPI, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
+    import httpx
 except ImportError:
-    raise SystemExit("FastAPI not installed. Run: pip install fastapi uvicorn")
+    raise SystemExit("FastAPI not installed. Run: pip install fastapi uvicorn httpx")
 
+MAGMA_GRAPHQL = "https://magma.amboss.tech/graphql"
+MAGMA_API_KEY = os.getenv("MAGMA_API_KEY", "")  # optional — anonymous access works without it
 LND_DIR = "/var/lib/lnd"
 LND_USER = "lnd"
 BACKUP_DIR = "/var/lib/mercury/backups"
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.3.0"
 
 app = FastAPI(
     title="Mercury Agent API",
@@ -240,6 +247,139 @@ def trigger_backup():
     with open(path, "w") as f:
         json.dump(data, f)
     return {"status": "ok", "path": path, "ts": ts}
+
+
+
+# ── Magma helpers ─────────────────────────────────────────────────────────────
+
+async def magma_query(query: str, variables: dict = None):
+    """Execute a GraphQL query against the Amboss Magma API."""
+    headers = {"Content-Type": "application/json"}
+    if MAGMA_API_KEY:
+        headers["Authorization"] = f"Bearer {MAGMA_API_KEY}"
+    payload = {"query": query}
+    if variables:
+        payload["variables"] = variables
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(MAGMA_GRAPHQL, json=payload, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+        if "errors" in data:
+            raise HTTPException(status_code=502, detail=f"Magma error: {data['errors']}")
+        return data.get("data", {})
+
+
+@app.get("/api/magma/offers")
+async def get_magma_offers(min_sat: int = 100000, max_sat: int = 5000000):
+    """
+    Fetch live inbound liquidity offers from Magma marketplace.
+    Returns offers sized between min_sat and max_sat.
+    Anonymous access — no API key required.
+    """
+    query = """
+    query GetOffers($minSize: Float, $maxSize: Float) {
+      getOffers(where: { min_channel_size: { gte: $minSize }, max_channel_size: { lte: $maxSize } }) {
+        id
+        node_pubkey
+        min_channel_size
+        max_channel_size
+        base_fee
+        fee_rate
+        min_block_length
+        order_quantity
+        status
+      }
+    }
+    """
+    try:
+        data = await magma_query(query, {"minSize": min_sat, "maxSize": max_sat})
+        offers = data.get("getOffers", [])
+        return {
+            "offers": offers,
+            "count": len(offers),
+            "filter": {"min_sat": min_sat, "max_sat": max_sat},
+            "note": "anonymous_access" if not MAGMA_API_KEY else "authenticated",
+        }
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Magma unreachable: {e}")
+
+
+@app.get("/api/magma/node-score")
+async def get_magma_node_score():
+    """
+    Fetch HVE-Mercury's Amboss node health score and reputation metrics.
+    Requires our pubkey — uses node info from LND getinfo.
+    """
+    info, _ = lncli("getinfo"), None
+    info = lncli("getinfo")[0]
+    if not info:
+        raise HTTPException(status_code=503, detail="LND unavailable")
+    pubkey = info.get("identity_pubkey")
+
+    query = """
+    query GetNodeScore($pubkey: String!) {
+      getNode(pubkey: $pubkey) {
+        alias
+        capacity
+        channel_count
+        amboss_health {
+          score
+          grade
+          last_update
+        }
+      }
+    }
+    """
+    try:
+        data = await magma_query(query, {"pubkey": pubkey})
+        node = data.get("getNode", {})
+        return {
+            "pubkey": pubkey,
+            "alias": node.get("alias"),
+            "capacity_sat": node.get("capacity"),
+            "channel_count": node.get("channel_count"),
+            "health": node.get("amboss_health", {}),
+        }
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Magma unreachable: {e}")
+
+
+@app.get("/api/magma/recommend")
+async def get_magma_recommendations():
+    """
+    Pull Magma AI channel recommendations for our node.
+    Returns top peers to open channels with for optimal routing position.
+    Read-only intelligence — human approval required before any action.
+    """
+    info = lncli("getinfo")[0]
+    if not info:
+        raise HTTPException(status_code=503, detail="LND unavailable")
+    pubkey = info.get("identity_pubkey")
+
+    query = """
+    query GetRecommendations($pubkey: String!) {
+      getNodeRecommendations(pubkey: $pubkey) {
+        node_pubkey
+        alias
+        score
+        reason
+        suggested_size_sat
+        expected_routing_volume_sat
+      }
+    }
+    """
+    try:
+        data = await magma_query(query, {"pubkey": pubkey})
+        recs = data.get("getNodeRecommendations", [])
+        return {
+            "pubkey": pubkey,
+            "recommendations": recs,
+            "count": len(recs),
+            "action_required": "human_approval",
+            "note": "READ-ONLY — recommendations only, no channels opened automatically",
+        }
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Magma unreachable: {e}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
