@@ -636,6 +636,386 @@ def cmd_ask(args):
     _ask_local(question, system_prompt)
 
 
+def cmd_health(args):
+    """Full node diagnostic — hardware, stack, Lightning, AI, self-tests."""
+    import shutil
+
+    OK  = f"{G}✓{NC}"
+    ERR = f"{R}✗{NC}"
+    WRN = f"{Y}⚠{NC}"
+
+    results = []  # (ok, warn)
+
+    def chk(label, ok, detail="", warn=False):
+        sym = WRN if warn else (OK if ok else ERR)
+        results.append((ok, warn))
+        pad = 28
+        print(f"  {sym} {label:<{pad}} {DIM}{detail}{NC}")
+        return ok
+
+    def row(label, sym, detail):
+        ok = sym == OK
+        warn = sym == WRN
+        chk(label, ok, detail, warn=warn)
+
+    def sec(title):
+        print(f"\n{W}{title}{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+
+    print(f"\n{C}⚡ Mercury Node — Full Health Check{NC}  {DIM}v{MERCURY_VERSION}{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  {DIM}Running diagnostics...{NC}")
+
+    # ── 1. HARDWARE ──────────────────────────────────────────────────────────
+    sec("1 · Hardware")
+
+    # CPU / arch
+    try:
+        arch = subprocess.check_output(["uname", "-m"], text=True).strip()
+        cpus = subprocess.check_output(["nproc"], text=True).strip()
+        row("CPU", OK, f"{arch}  {cpus} cores")
+    except Exception:
+        row("CPU", ERR, "unavailable")
+
+    # RAM
+    try:
+        with open("/proc/meminfo") as f:
+            lines = {l.split(":")[0]: l.split(":")[1].strip() for l in f if ":" in l}
+        total_kb = int(lines["MemTotal"].split()[0])
+        avail_kb = int(lines["MemAvailable"].split()[0])
+        total_gb = round(total_kb / 1024 / 1024, 1)
+        used_gb  = round((total_kb - avail_kb) / 1024 / 1024, 1)
+        pct      = round(used_gb / total_gb * 100)
+        warn_ram = pct > 85
+        sym = WRN if warn_ram else OK
+        row("RAM", sym, f"{used_gb} GB / {total_gb} GB used ({pct}%)")
+    except Exception:
+        row("RAM", ERR, "unavailable")
+
+    # Disk
+    try:
+        disk = shutil.disk_usage("/")
+        used_gb = round(disk.used / 1024**3, 1)
+        total_gb = round(disk.total / 1024**3, 1)
+        pct = round(disk.used / disk.total * 100)
+        warn_disk = pct > 85
+        sym = WRN if warn_disk else OK
+        row("Disk /", sym, f"{used_gb} GB / {total_gb} GB used ({pct}%)")
+    except Exception:
+        row("Disk /", ERR, "unavailable")
+
+    # CPU temperature
+    try:
+        temp_raw = subprocess.check_output(
+            ["vcgencmd", "measure_temp"], text=True, stderr=subprocess.DEVNULL).strip()
+        temp_c = float(temp_raw.replace("temp=", "").replace("'C", ""))
+        warn_temp = temp_c > 70
+        sym = WRN if warn_temp else OK
+        row("CPU Temp", sym, f"{temp_c}°C")
+    except Exception:
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp") as f:
+                temp_c = int(f.read().strip()) / 1000
+            warn_temp = temp_c > 70
+            sym = WRN if warn_temp else OK
+            row("CPU Temp", sym, f"{temp_c}°C")
+        except Exception:
+            row("CPU Temp", WRN, "unavailable")
+
+    # Hailo AI accelerator
+    try:
+        hcli = subprocess.run(
+            ["hailortcli", "fw-control", "identify"],
+            capture_output=True, text=True, timeout=5
+        )
+        if hcli.returncode == 0:
+            fw = next((l.split(":")[1].strip() for l in hcli.stdout.splitlines() if "Firmware Version" in l), "?")
+            dev = next((l.split(":")[1].strip() for l in hcli.stdout.splitlines() if "Device Architecture" in l), "?")
+            row("Hailo AI", OK, f"{dev}  fw {fw}")
+        else:
+            row("Hailo AI", WRN, "detected but fw-control failed")
+    except FileNotFoundError:
+        row("Hailo AI", WRN, "hailortcli not found")
+    except Exception as e:
+        row("Hailo AI", WRN, str(e)[:40])
+
+    # System uptime / load
+    try:
+        with open("/proc/uptime") as f:
+            secs = float(f.read().split()[0])
+        d, rem = divmod(int(secs), 86400)
+        h, rem = divmod(rem, 3600)
+        m      = rem // 60
+        uptime = f"{d}d {h}h {m}m" if d else f"{h}h {m}m"
+        with open("/proc/loadavg") as f:
+            load = f.read().split()[:3]
+        row("Uptime / Load", OK, f"{uptime}  load {' '.join(load)}")
+    except Exception:
+        row("Uptime / Load", WRN, "unavailable")
+
+    # ── 2. SERVICES ──────────────────────────────────────────────────────────
+    sec("2 · Services")
+
+    services = [
+        ("bitcoind",       "Bitcoin Core"),
+        ("lnd",            "LND"),
+        ("btcpayserver",   "BTCPay Server"),
+        ("nbxplorer",      "NBXplorer"),
+        ("nginx",          "Nginx"),
+        ("mercury-agent",  "Mercury Agent"),
+        ("mercury-llm",    "Mercury LLM (Phi-3.5)"),
+    ]
+
+    svc_status = {}
+    for svc, label in services:
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", svc],
+                capture_output=True, text=True, timeout=5
+            )
+            active = r.stdout.strip() == "active"
+            svc_status[svc] = active
+            row(label, OK if active else ERR, "active" if active else r.stdout.strip())
+        except Exception:
+            svc_status[svc] = False
+            row(label, ERR, "check failed")
+
+    # ── 3. BITCOIN CORE ──────────────────────────────────────────────────────
+    sec("3 · Bitcoin Core")
+
+    # BTCPay sets up bitcoin-cli with a config file; try common locations
+    btc_cookie_args = []
+    for cookie in ["/var/lib/btcpayserver/bitcoin/.cookie",
+                   "/var/lib/bitcoin/.cookie",
+                   "/data/bitcoin/.cookie"]:
+        if os.path.exists(cookie):
+            btc_cookie_args = [f"-rpccookiefile={cookie}"]
+            break
+
+    try:
+        btc = subprocess.run(
+            ["bitcoin-cli"] + btc_cookie_args + ["getblockchaininfo"],
+            capture_output=True, text=True, timeout=10
+        )
+        if btc.returncode == 0:
+            bci = json.loads(btc.stdout)
+            blocks   = bci.get("blocks", 0)
+            headers  = bci.get("headers", 0)
+            progress = round(bci.get("verificationprogress", 0) * 100, 2)
+            pruned   = bci.get("pruned", False)
+            synced   = blocks == headers
+            row("Block height", OK if synced else WRN, f"{blocks} / {headers}  ({progress}%)")
+            row("Chain", OK, f"{bci.get('chain', '?')}  pruned={pruned}")
+        else:
+            # Fall back: we already have chain info from LND getinfo
+            row("Bitcoin Core RPC", WRN, "auth failed — chain data sourced from LND")
+    except Exception:
+        row("Bitcoin Core RPC", WRN, "bitcoin-cli not in PATH — chain data sourced from LND")
+
+    # BTC network peers
+    try:
+        np = subprocess.run(
+            ["bitcoin-cli"] + btc_cookie_args + ["getnetworkinfo"],
+            capture_output=True, text=True, timeout=10
+        )
+        if np.returncode == 0:
+            ni = json.loads(np.stdout)
+            conns = ni.get("connections", 0)
+            warn_peers = conns < 4
+            row("BTC Peers", WRN if warn_peers else OK, f"{conns} connections")
+    except Exception:
+        pass
+
+    # ── 4. LIGHTNING (LND) ───────────────────────────────────────────────────
+    sec("4 · Lightning (LND)")
+
+    info, err = lncli("getinfo")
+    if info:
+        synced_chain = info.get("synced_to_chain", False)
+        synced_graph = info.get("synced_to_graph", False)
+        block        = info.get("block_height", 0)
+        active_ch    = info.get("num_active_channels", 0)
+        pending_ch   = info.get("num_pending_channels", 0)
+        inactive_ch  = info.get("num_inactive_channels", 0)
+        peers        = info.get("num_peers", 0)
+        lnd_ver      = info.get("version", "?").split(" ")[0]
+
+        row("LND version", OK, lnd_ver)
+        row("Chain sync", OK if synced_chain else ERR, f"block {block}  synced={synced_chain}")
+        row("Graph sync", OK if synced_graph else WRN, f"synced={synced_graph}")
+        row("Channels", OK if active_ch > 0 else WRN,
+            f"{active_ch} active  {pending_ch} pending  {inactive_ch} inactive")
+        row("Peers", OK if peers > 0 else WRN, f"{peers} connected")
+    else:
+        row("LND getinfo", ERR, err or "unavailable")
+
+    # Wallet balance
+    wallet, _ = lncli("walletbalance")
+    if wallet:
+        conf   = int(wallet.get("confirmed_balance", 0))
+        unconf = int(wallet.get("unconfirmed_balance", 0))
+        locked = int(wallet.get("locked_balance", 0))
+        row("On-chain wallet", OK, f"{fmt_sat(conf)} confirmed  {fmt_sat(unconf)} unconf  {fmt_sat(locked)} locked")
+
+    # Channel liquidity
+    chans, _ = lncli("listchannels")
+    if chans and chans.get("channels"):
+        total_local  = sum(int(c["local_balance"])  for c in chans["channels"])
+        total_remote = sum(int(c["remote_balance"]) for c in chans["channels"])
+        total_cap    = sum(int(c["capacity"])        for c in chans["channels"])
+        local_pct    = round(total_local / total_cap * 100) if total_cap else 0
+        inactive     = [c for c in chans["channels"] if not c.get("active")]
+        warn_liq     = local_pct > 90 or local_pct < 10
+        warn_inactive = len(inactive) > 0
+        row("Lightning balance", WRN if warn_liq else OK,
+            f"local {fmt_sat(total_local)}  remote {fmt_sat(total_remote)}  ({local_pct}% local)")
+        if warn_inactive:
+            row("Inactive channels", WRN, f"{len(inactive)} channel(s) inactive")
+
+    # Pending HTLCs
+    try:
+        fwd, _ = lncli("listchannels")
+        if fwd:
+            htlcs = sum(len(c.get("pending_htlcs", [])) for c in fwd.get("channels", []))
+            if htlcs > 0:
+                row("Pending HTLCs", WRN, f"{htlcs} in-flight")
+            else:
+                row("Pending HTLCs", OK, "none")
+    except Exception:
+        pass
+
+    # Channel backup freshness
+    try:
+        backup_path = "/var/lib/lnd/data/chain/bitcoin/mainnet/channel.backup"
+        mtime = os.path.getmtime(backup_path)
+        age_h = round((time.time() - mtime) / 3600, 1)
+        warn_backup = age_h > 24
+        row("Channel backup", WRN if warn_backup else OK,
+            f"{backup_path.split('/')[-1]}  {age_h}h ago")
+    except Exception:
+        row("Channel backup", WRN, "backup file not found")
+
+    # ── 5. AI STACK ──────────────────────────────────────────────────────────
+    sec("5 · AI Stack")
+
+    # Mercury agent API
+    data, err = _agent_get("/api/status")
+    row("Mercury Agent API", OK if data else ERR,
+        f"http://localhost:8088  {'responding' if data else err}")
+
+    # Local LLM (Phi-3.5-mini)
+    try:
+        req = urllib.request.Request(
+            f"{LOCAL_LLM_URL}/v1/models",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            row("Local LLM (Phi-3.5)", OK, f"http://127.0.0.1:8089  responding")
+    except urllib.error.URLError:
+        row("Local LLM (Phi-3.5)", WRN, "not responding — sudo systemctl start mercury-llm")
+
+    # DGX Spark Ollama
+    try:
+        req = urllib.request.Request(f"{OLLAMA_URL}/api/tags")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            d = json.loads(r.read())
+            models = [m["name"] for m in d.get("models", [])]
+            row("DGX Spark (Ollama)", OK, f"{OLLAMA_URL}  {len(models)} models loaded")
+    except urllib.error.URLError:
+        row("DGX Spark (Ollama)", WRN, f"unreachable — fallback to local AI active")
+
+    # ── 6. NETWORK ───────────────────────────────────────────────────────────
+    sec("6 · Network")
+
+    # External reachability
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "5", "https://api.ipify.org"],
+            capture_output=True, text=True, timeout=8
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            row("External IP", OK, r.stdout.strip())
+        else:
+            row("External IP", WRN, "not reachable")
+    except Exception:
+        row("External IP", WRN, "check failed")
+
+    # LND REST/gRPC ports
+    for port, label in [("9735", "LND P2P (9735)"), ("8080", "LND REST (8080)")]:
+        try:
+            r = subprocess.run(
+                ["ss", "-tlnp", f"sport = :{port}"],
+                capture_output=True, text=True, timeout=5
+            )
+            listening = port in r.stdout
+            row(label, OK if listening else WRN, "listening" if listening else "not listening")
+        except Exception:
+            row(label, WRN, "check failed")
+
+    # BTCPay HTTP
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", "5", "http://localhost:80"],
+            capture_output=True, text=True, timeout=8
+        )
+        code = r.stdout.strip()
+        ok   = code in ("200", "302", "301")
+        row("BTCPay HTTP", OK if ok else WRN, f"HTTP {code}")
+    except Exception:
+        row("BTCPay HTTP", WRN, "check failed")
+
+    # ── 7. SECURITY ──────────────────────────────────────────────────────────
+    sec("7 · Security")
+
+    # SSH key auth (no password login)
+    try:
+        r = subprocess.run(
+            ["sshd", "-T"],
+            capture_output=True, text=True, timeout=5
+        )
+        pwd_auth = any("passwordauthentication yes" in l.lower() for l in r.stdout.splitlines())
+        row("SSH password auth", OK if not pwd_auth else WRN,
+            "disabled (key-only)" if not pwd_auth else "ENABLED — recommend disabling")
+    except Exception:
+        row("SSH password auth", WRN, "could not check sshd config")
+
+    # UFW firewall
+    try:
+        r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
+        active = "active" in r.stdout.lower()
+        row("UFW Firewall", OK if active else WRN, "active" if active else "inactive — consider enabling")
+    except Exception:
+        row("UFW Firewall", WRN, "ufw not found")
+
+    # Fail2ban
+    try:
+        r = subprocess.run(["systemctl", "is-active", "fail2ban"],
+                           capture_output=True, text=True, timeout=5)
+        active = r.stdout.strip() == "active"
+        row("Fail2ban", OK if active else WRN, "active" if active else "inactive")
+    except Exception:
+        row("Fail2ban", WRN, "not found")
+
+    # ── SUMMARY ──────────────────────────────────────────────────────────────
+    errors = sum(1 for ok, warn in results if not ok and not warn)
+    warns  = sum(1 for ok, warn in results if warn)
+    passed = sum(1 for ok, warn in results if ok and not warn)
+
+    print(f"\n{DIM}{'─' * 55}{NC}")
+    if errors == 0 and warns == 0:
+        grade = f"{G}ALL SYSTEMS GO ✓{NC}"
+    elif errors == 0:
+        grade = f"{Y}HEALTHY WITH WARNINGS{NC}"
+    elif errors <= 2:
+        grade = f"{Y}DEGRADED — ACTION NEEDED{NC}"
+    else:
+        grade = f"{R}CRITICAL — MULTIPLE FAILURES{NC}"
+
+    print(f"\n  {grade}")
+    print(f"  {DIM}{passed - warns} passed  {warns} warnings  {errors} errors{NC}\n")
+
+
 def cmd_version(args):
     info, _ = lncli("getinfo")
     lnd_ver = info.get("version", "unknown") if info else "unavailable"
@@ -653,7 +1033,8 @@ def cmd_shell(args=None):
     import shlex
 
     COMMANDS = {"status", "channels", "invoices", "sync", "peers",
-                "backup", "logs", "pay", "invoice", "magma", "version", "help", "exit", "quit"}
+                "backup", "logs", "pay", "invoice", "magma", "health",
+                "version", "help", "exit", "quit"}
 
     dispatch = {
         "status":   cmd_status,
@@ -666,6 +1047,7 @@ def cmd_shell(args=None):
         "pay":      cmd_pay,
         "invoice":  cmd_invoice,
         "magma":    cmd_magma,
+        "health":   cmd_health,
         "version":  cmd_version,
     }
 
@@ -772,6 +1154,7 @@ def main():
     )
     sub = parser.add_subparsers(dest="command")
 
+    sub.add_parser("health",   help="Full system diagnostic + self-test")
     sub.add_parser("shell",    help="Interactive shell (no 'mercury' prefix needed)")
     sub.add_parser("status",   help="Node health at a glance")
     sub.add_parser("sync",     help="Bitcoin sync progress")
@@ -819,6 +1202,7 @@ def main():
         "invoice":  cmd_invoice,
         "magma":    cmd_magma,
         "ask":      cmd_ask,
+        "health":   cmd_health,
         "version":  cmd_version,
         "shell":    cmd_shell,
     }
