@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-Mercury Node CLI — v0.2
+Mercury Node CLI — v0.3
 Terminal-native control for your sovereign Bitcoin Lightning node.
 
 Usage:
-  mercury status           Node health at a glance
-  mercury channels         Lightning channel overview
-  mercury invoices         Recent payments
-  mercury sync             Bitcoin sync progress
-  mercury logs [service]   Live log tail
-  mercury backup           Export static channel backup
-  mercury peers            Connected Lightning peers
-  mercury version          Show version info
+  mercury status                  Node health at a glance
+  mercury channels                Lightning channel overview
+  mercury invoices [--last N]     Recent payments
+  mercury sync                    Bitcoin sync progress
+  mercury logs [service]          Live log tail
+  mercury backup                  Export static channel backup
+  mercury peers                   Connected Lightning peers
+  mercury pay <bolt11>            Send a Lightning payment
+  mercury invoice <sat> [memo]    Create a Lightning invoice
+  mercury magma [offers|score|recommend]  Magma liquidity intelligence
+  mercury ask "<question>"        Ask your node anything (AI — DGX Ollama)
+  mercury version                 Show version info
 """
 
 import sys
@@ -20,23 +24,27 @@ import json
 import subprocess
 import argparse
 import time
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-MERCURY_VERSION = "0.2.0"
+MERCURY_VERSION = "0.3.0"
 LND_DIR = "/var/lib/lnd"
 LND_USER = "lnd"
 AGENT_URL = "http://localhost:8088"
+OLLAMA_URL = os.getenv("MERCURY_OLLAMA_URL", "http://10.0.0.79:11434")
+OLLAMA_MODEL = os.getenv("MERCURY_OLLAMA_MODEL", "qwen2.5:14b")
 
 # ANSI colors
-R  = "\033[0;31m"
-Y  = "\033[1;33m"
-G  = "\033[0;32m"
-B  = "\033[0;34m"
-C  = "\033[0;36m"
-W  = "\033[1;37m"
+R   = "\033[0;31m"
+Y   = "\033[1;33m"
+G   = "\033[0;32m"
+B   = "\033[0;34m"
+C   = "\033[0;36m"
+W   = "\033[1;37m"
 DIM = "\033[2m"
-NC = "\033[0m"
+NC  = "\033[0m"
 
 # ── LND wrapper ───────────────────────────────────────────────────────────────
 
@@ -353,6 +361,222 @@ def cmd_logs(args):
     os.execlp("journalctl", "journalctl", "-u", service, "-f", "--no-pager")
 
 
+def cmd_pay(args):
+    bolt11 = args.bolt11
+    print(f"\n{W}Lightning Payment{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  Invoice: {DIM}{bolt11[:60]}...{NC}")
+    print(f"\n  {Y}⚠  About to send payment. Confirm? [y/N]{NC} ", end="", flush=True)
+    try:
+        answer = input()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  {Y}Cancelled.{NC}\n")
+        return
+    if answer.strip().lower() != "y":
+        print(f"  {Y}Cancelled.{NC}\n")
+        return
+
+    print(f"  {DIM}Sending...{NC}")
+    data, err = lncli("payinvoice", "--force", bolt11, timeout=60)
+    if err:
+        print(f"  {R}Payment failed: {err}{NC}\n")
+        return
+    status = data.get("status", "")
+    preimage = data.get("payment_preimage", "")
+    fee = int(data.get("fee_sat", 0))
+    if status == "SUCCEEDED":
+        print(f"  {G}✅ Payment sent!{NC}")
+        print(f"  Fee paid: {fmt_sat(fee)}")
+        print(f"  Preimage: {DIM}{preimage[:32]}...{NC}")
+    else:
+        print(f"  {R}Payment status: {status}{NC}")
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+
+def cmd_invoice(args):
+    sat = args.sat
+    memo = args.memo or ""
+    print(f"\n{W}Create Lightning Invoice{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
+    data, err = lncli("addinvoice", f"--amt={sat}", f"--memo={memo}", "--expiry=3600")
+    if err:
+        print(f"  {R}Failed: {err}{NC}\n")
+        return
+
+    pay_req = data.get("payment_request", "")
+    r_hash = data.get("r_hash", "")
+
+    print(f"  {G}✅ Invoice created{NC}")
+    print(f"  Amount: {W}{fmt_sat(sat)}{NC}")
+    if memo:
+        print(f"  Memo:   {memo}")
+    print(f"  Expiry: 1 hour")
+    print(f"\n  {W}BOLT11:{NC}")
+    print(f"  {C}{pay_req}{NC}")
+    print(f"\n  {DIM}Hash: {r_hash[:32]}...{NC}")
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+
+def _agent_get(path):
+    """Fetch JSON from mercury-agent, return (data, error)."""
+    try:
+        req = urllib.request.Request(f"{AGENT_URL}{path}")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read()), None
+    except Exception as e:
+        return None, str(e)
+
+
+def cmd_magma(args):
+    subcmd = getattr(args, 'subcmd', None) or 'offers'
+
+    if subcmd == 'offers':
+        print(f"\n{W}Magma — Live Liquidity Offers{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        data, err = _agent_get("/api/magma/offers")
+        if err:
+            print(f"  {R}Agent unavailable: {err}{NC}")
+            print(f"  {DIM}Is mercury-agent running? sudo systemctl status mercury-agent{NC}\n")
+            return
+        offers = data.get("offers", [])
+        note = data.get("note", "")
+        print(f"  {DIM}Access: {note}  |  {data.get('count', 0)} offers{NC}\n")
+        if not offers:
+            print(f"  {Y}No offers in current size range.{NC}")
+            print(f"  {DIM}Try: mercury magma offers --min 50000 --max 10000000{NC}")
+        else:
+            for o in offers[:10]:
+                size_min = int(o.get("min_channel_size", 0))
+                size_max = int(o.get("max_channel_size", 0))
+                fee_rate = o.get("fee_rate", "?")
+                base_fee = o.get("base_fee", "?")
+                status   = o.get("status", "")
+                dot = G if status == "OPEN" else Y
+                print(f"  {dot}●{NC} {fmt_sat(size_min)} – {fmt_sat(size_max)}  "
+                      f"fee {fee_rate} ppm  base {base_fee} mSat  {DIM}{status}{NC}")
+
+    elif subcmd == 'score':
+        print(f"\n{W}Magma — HVE-Mercury Node Score{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        data, err = _agent_get("/api/magma/node-score")
+        if err:
+            print(f"  {R}Agent unavailable: {err}{NC}\n")
+            return
+        health = data.get("health", {})
+        score  = health.get("score", "N/A")
+        grade  = health.get("grade", "N/A")
+        cap    = data.get("capacity_sat")
+        chans  = data.get("channel_count")
+        print(f"  Alias:    {W}{data.get('alias', 'HVE-Mercury')}{NC}")
+        if cap:
+            print(f"  Capacity: {W}{fmt_sat(cap)}{NC}")
+        if chans is not None:
+            print(f"  Channels: {W}{chans}{NC}")
+        if score != "N/A":
+            color = G if float(score) >= 70 else Y if float(score) >= 40 else R
+            print(f"  Score:    {color}{score} / 100  grade {grade}{NC}")
+        else:
+            print(f"  {Y}Score not yet available — claim node on amboss.space first{NC}")
+            print(f"  {DIM}amboss.space/node/0206c9ccd47c19f4833a5cbe7c6990eb5d6678045d7bb508c0c6fda50e6b43ee14{NC}")
+
+    elif subcmd == 'recommend':
+        print(f"\n{W}Magma — AI Channel Recommendations{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        data, err = _agent_get("/api/magma/recommend")
+        if err:
+            print(f"  {R}Agent unavailable: {err}{NC}\n")
+            return
+        recs = data.get("recommendations", [])
+        if not recs:
+            print(f"  {Y}No recommendations yet.{NC}")
+            print(f"  {DIM}Recommendations improve as your node builds history on the graph.{NC}")
+        else:
+            for r in recs:
+                alias   = r.get("alias", r.get("node_pubkey", "")[:16] + "...")
+                score   = r.get("score", "")
+                reason  = r.get("reason", "")
+                size    = r.get("suggested_size_sat", 0)
+                print(f"  {G}→{NC} {W}{alias}{NC}  score {score}")
+                if size:
+                    print(f"     Suggested size: {fmt_sat(size)}")
+                if reason:
+                    print(f"     {DIM}{reason}{NC}")
+        print(f"\n  {Y}⚠  READ-ONLY — human approval required before opening channels{NC}")
+    else:
+        print(f"{R}Unknown magma subcommand: {subcmd}{NC}")
+        print(f"  Use: mercury magma [offers|score|recommend]")
+
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+
+def cmd_ask(args):
+    question = " ".join(args.question)
+    print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(via DGX Spark — {OLLAMA_MODEL}){NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  {W}Q:{NC} {question}\n")
+
+    # Gather live node context to give the model real data
+    info, _  = lncli("getinfo")
+    wallet, _ = lncli("walletbalance")
+    channels, _ = lncli("listchannels")
+    pending, _  = lncli("pendingchannels")
+
+    node_ctx = ""
+    if info:
+        node_ctx += f"Node alias: {info.get('alias')}\n"
+        node_ctx += f"Block height: {info.get('block_height')}, synced: {info.get('synced_to_chain')}\n"
+        node_ctx += f"Active channels: {info.get('num_active_channels')}, pending: {info.get('num_pending_channels')}\n"
+    if wallet:
+        node_ctx += f"Wallet: {wallet.get('confirmed_balance')} SAT confirmed, {wallet.get('unconfirmed_balance')} SAT pending\n"
+    if channels:
+        for c in channels.get("channels", []):
+            local = int(c["local_balance"])
+            cap   = int(c["capacity"])
+            pct   = round(local/cap*100, 1) if cap else 0
+            node_ctx += f"Channel: local {local} SAT / capacity {cap} SAT ({pct}% local)\n"
+    if pending:
+        for p in pending.get("pending_open_channels", []):
+            ch = p.get("channel", {})
+            node_ctx += f"Pending channel: {ch.get('local_balance')} SAT / {ch.get('capacity')} SAT (awaiting confirmation)\n"
+
+    system_prompt = (
+        "You are Mercury, an AI agent living inside a sovereign Bitcoin Lightning node "
+        "operated by Human Value Exchange (HVE). You have real-time access to the node's "
+        "telemetry. Answer questions concisely and practically. "
+        "Always think in SATs. Recommend actions when useful but always note that "
+        "human approval is required before any funds move. "
+        "Current node data:\n" + node_ctx
+    )
+
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "prompt": question,
+        "system": system_prompt,
+        "stream": True,
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        print(f"  {G}A:{NC} ", end="", flush=True)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            for line in r:
+                chunk = json.loads(line.decode())
+                token = chunk.get("response", "")
+                print(token, end="", flush=True)
+                if chunk.get("done"):
+                    break
+        print(f"\n")
+    except urllib.error.URLError as e:
+        print(f"\n  {R}DGX Ollama unreachable ({OLLAMA_URL}): {e}{NC}")
+        print(f"  {DIM}Set MERCURY_OLLAMA_URL env var if DGX is on a different address.{NC}\n")
+
+
 def cmd_version(args):
     info, _ = lncli("getinfo")
     lnd_ver = info.get("version", "unknown") if info else "unavailable"
@@ -377,7 +601,7 @@ def main():
     sub.add_parser("backup",   help="Export static channel backup")
     sub.add_parser("version",  help="Version info")
 
-    ch_p = sub.add_parser("channels", help="Lightning channel overview")
+    sub.add_parser("channels", help="Lightning channel overview")
 
     inv_p = sub.add_parser("invoices", help="Recent payments")
     inv_p.add_argument("--last", type=int, default=10, metavar="N", help="Show last N invoices")
@@ -385,6 +609,23 @@ def main():
     log_p = sub.add_parser("logs", help="Live log tail")
     log_p.add_argument("service", nargs="?", default="lnd",
                        help="Service: lnd, bitcoind, btcpayserver, nbxplorer, nginx, mercury-agent")
+
+    pay_p = sub.add_parser("pay", help="Send a Lightning payment")
+    pay_p.add_argument("bolt11", help="BOLT11 invoice string")
+
+    inv_create_p = sub.add_parser("invoice", help="Create a Lightning invoice")
+    inv_create_p.add_argument("sat", type=int, help="Amount in satoshis")
+    inv_create_p.add_argument("memo", nargs="?", default="", help="Optional memo")
+
+    magma_p = sub.add_parser("magma", help="Magma liquidity intelligence")
+    magma_p.add_argument("subcmd", nargs="?", default="offers",
+                         choices=["offers", "score", "recommend"],
+                         help="offers (default), score, recommend")
+    magma_p.add_argument("--min", type=int, default=100000, dest="min_sat", metavar="SAT")
+    magma_p.add_argument("--max", type=int, default=5000000, dest="max_sat", metavar="SAT")
+
+    ask_p = sub.add_parser("ask", help="Ask your node anything (AI)")
+    ask_p.add_argument("question", nargs="+", help="Your question in natural language")
 
     args = parser.parse_args()
 
@@ -396,6 +637,10 @@ def main():
         "peers":    cmd_peers,
         "backup":   cmd_backup,
         "logs":     cmd_logs,
+        "pay":      cmd_pay,
+        "invoice":  cmd_invoice,
+        "magma":    cmd_magma,
+        "ask":      cmd_ask,
         "version":  cmd_version,
     }
 
