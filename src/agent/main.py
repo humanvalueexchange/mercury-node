@@ -432,7 +432,7 @@ def get_payments(limit: int = 50):
 def _magma_headers(api_key: str = "") -> dict:
     headers = {"Content-Type": "application/json"}
     if api_key:
-        headers["Authorization"] = "Bearer " + api_key
+        headers["Authorization"] = f"Bearer {api_key}"
     return headers
 
 

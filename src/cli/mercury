@@ -30,6 +30,8 @@ import urllib.request
 import urllib.error
 import re
 from pathlib import Path
+from mercury_cli.config import load_config
+from mercury_cli.lnd import LndClient, LncliError
 from mercury_cli.registry import Permission, ToolRegistry, ToolSpec
 try:
     import readline
@@ -39,13 +41,14 @@ from datetime import datetime, timezone
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MERCURY_VERSION = "0.10.0"
-LND_DIR = "/var/lib/lnd"
-LND_USER = "lnd"
-AGENT_URL = "http://localhost:8088"
-OLLAMA_URL = os.getenv("MERCURY_OLLAMA_URL", "http://10.0.0.79:11434")
-LOCAL_LLM_URL   = os.getenv("MERCURY_LOCAL_LLM_URL", "http://127.0.0.1:8089")
-LOCAL_LLM_MODEL = os.getenv("MERCURY_LOCAL_LLM_MODEL", "/opt/mercury/models/Qwen3.8-2B-Distill-Q4_K_M.gguf")
-OLLAMA_MODEL = os.getenv("MERCURY_OLLAMA_MODEL", "qwen2.5:14b")
+CONFIG = load_config()
+LND_DIR = str(CONFIG.lnd_dir)
+LND_USER = CONFIG.lnd_user
+AGENT_URL = CONFIG.agent_url
+OLLAMA_URL = CONFIG.ollama_url
+LOCAL_LLM_URL = CONFIG.local_llm_url
+LOCAL_LLM_MODEL = str(CONFIG.local_llm_model)
+OLLAMA_MODEL = CONFIG.ollama_model
 
 # ── Node Directory ────────────────────────────────────────────────────────────
 # Well-known routing nodes — referenced by short alias in `channel open` and `nodes`
@@ -224,22 +227,18 @@ TOOL_REGISTRY = ToolRegistry()
 
 # ── LND wrapper ───────────────────────────────────────────────────────────────
 
+LND_CLIENT = LndClient(
+    CONFIG,
+    command_prefix=("sudo", "-u", LND_USER),
+)
+
 def lncli(*args, timeout=15):
-    """Run lncli command, return parsed JSON or raise."""
-    cmd = ["sudo", "-u", LND_USER, "lncli", f"--lnddir={LND_DIR}"] + list(args)
+    """Run an LND command through the shared typed adapter."""
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        )
-        if result.returncode != 0:
-            return None, result.stderr.strip()
-        return json.loads(result.stdout), None
-    except subprocess.TimeoutExpired:
-        return None, "timeout"
-    except json.JSONDecodeError as e:
-        return None, f"json error: {e}"
-    except Exception as e:
-        return None, str(e)
+        result = LND_CLIENT.run(*args, timeout=timeout)
+        return result.data, None
+    except LncliError as exc:
+        return None, str(exc)
 
 
 def systemctl_is_active(service):
@@ -395,6 +394,11 @@ def cmd_status(args):
 def cmd_status_tool(args):
     """Run node status through the shared read-only tool registry."""
     return TOOL_REGISTRY.execute("node.status", args)
+
+
+def execute_read_only_tool(name, args):
+    """Execute a registered read-only command through the shared policy layer."""
+    return TOOL_REGISTRY.execute(name, args)
 
 
 def cmd_channels(args):
@@ -4079,7 +4083,7 @@ def cmd_suggest(args):
         'https://api.github.com/repos/humanvalueexchange/mercury/issues',
         data=payload,
         headers={
-            'Authorization': 'token ' + token,
+            'Authorization': f'token {token}',
             'Accept': 'application/vnd.github+json',
             'Content-Type': 'application/json',
             'X-GitHub-Api-Version': '2022-11-28',
@@ -4208,7 +4212,7 @@ def cmd_generate_idea(args):
         "https://api.github.com/repos/humanvalueexchange/mercury/issues",
         data=payload,
         headers={
-            "Authorization": "token " + token,
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -4315,7 +4319,7 @@ def cmd_generate_backlog(args):
             "https://api.github.com/repos/humanvalueexchange/mercury/issues",
             data=payload,
             headers={
-                "Authorization": "token " + token,
+                "Authorization": f"token {token}",
                 "Accept": "application/vnd.github+json",
                 "Content-Type": "application/json",
                 "X-GitHub-Api-Version": "2022-11-28",
@@ -4767,11 +4771,11 @@ def cmd_shell(args=None):
                 "rebalance", "channel", "nodes", "transactions", "fees", "payments", "routing", "version", "help", "exit", "quit", "clear", "cls", "post-share", "suggest", "generate-backlog", "generate-idea", "vote", "rank-backlog", "recommend", "tonight"}
 
     dispatch = {
-        "status":    cmd_status_tool,
-        "channels":  cmd_channels,
-        "invoices":  cmd_invoices,
-        "sync":      cmd_sync,
-        "peers":     cmd_peers,
+        "status":    lambda args: execute_read_only_tool("node.status", args),
+        "channels":  lambda args: execute_read_only_tool("node.channels", args),
+        "invoices":  lambda args: execute_read_only_tool("node.invoices", args),
+        "sync":      lambda args: execute_read_only_tool("node.sync", args),
+        "peers":     lambda args: execute_read_only_tool("node.peers", args),
         "backup":    cmd_backup,
         "alerts":    cmd_alerts,
         "logs":      cmd_logs,
@@ -4781,13 +4785,13 @@ def cmd_shell(args=None):
         "deposit":   cmd_deposit,
         "magma":     cmd_magma,
         "channel":   cmd_channel,
-        "nodes":     cmd_nodes,
-        "transactions": cmd_transactions,
+        "nodes":     lambda args: execute_read_only_tool("node.nodes", args),
+        "transactions": lambda args: execute_read_only_tool("node.transactions", args),
         "fees":      cmd_fees,
-        "payments":  cmd_payments,
-        "routing":   cmd_routing,
+        "payments":  lambda args: execute_read_only_tool("node.payments", args),
+        "routing":   lambda args: execute_read_only_tool("node.routing", args),
         "rebalance": cmd_rebalance,
-        "health":    cmd_health,
+        "health":    lambda args: execute_read_only_tool("node.health", args),
         "version":   cmd_version,
         "post-share": cmd_post_share,
         "suggest":    cmd_suggest,
@@ -5216,11 +5220,11 @@ def main():
         "nodes":    cmd_nodes,
         "transactions": cmd_transactions,
         "fees":     cmd_fees,
-        "payments": cmd_payments,
-        "routing":  cmd_routing,
+        "payments":  lambda args: execute_read_only_tool("node.payments", args),
+        "routing":   lambda args: execute_read_only_tool("node.routing", args),
         "rebalance": cmd_rebalance,
         "ask":      cmd_ask,
-        "health":   cmd_health,
+        "health":   lambda args: execute_read_only_tool("node.health", args),
         "version":  cmd_version,
         "shell":    cmd_shell,
         "post":     cmd_post,
@@ -5247,14 +5251,26 @@ def main():
         sys.exit(1)
 
 
-TOOL_REGISTRY.register(
-    ToolSpec(
-        name="node.status",
-        description="Read the current Mercury node status",
-        permission=Permission.READ_ONLY,
-        handler=cmd_status,
+for _name, _description, _handler in (
+    ("node.status", "Read the current Mercury node status", cmd_status),
+    ("node.channels", "Read local Lightning channel state", cmd_channels),
+    ("node.invoices", "Read recent Lightning invoices", cmd_invoices),
+    ("node.sync", "Read Bitcoin synchronization state", cmd_sync),
+    ("node.peers", "Read connected Lightning peers", cmd_peers),
+    ("node.health", "Read the full node health report", cmd_health),
+    ("node.nodes", "Read the known routing node directory", cmd_nodes),
+    ("node.transactions", "Read recent on-chain transactions", cmd_transactions),
+    ("node.payments", "Read Lightning payment history", cmd_payments),
+    ("node.routing", "Read forwarding history and routing fees", cmd_routing),
+):
+    TOOL_REGISTRY.register(
+        ToolSpec(
+            name=_name,
+            description=_description,
+            permission=Permission.READ_ONLY,
+            handler=_handler,
+        )
     )
-)
 
 
 if __name__ == "__main__":

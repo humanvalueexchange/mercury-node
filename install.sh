@@ -18,7 +18,8 @@ LND_SHA256="013489343eebe8b0213b5f52fc7570e6f873f3f17974826cb94125ee1287d306"
 MIN_RAM_GB=16
 MIN_DISK_GB=1000
 INSTALL_ROOT="/opt/mercury"
-BITCOIN_DATADIR="${MERCURY_BITCOIN_DATADIR:-/var/lib/bitcoin}"
+BITCOIN_DATADIR="${MERCURY_BITCOIN_DATADIR:-/mnt/blockchain/bitcoin}"
+BITCOIN_DATADIR_EXPLICIT="${MERCURY_BITCOIN_DATADIR+x}"
 SCRIPT_DIR=""
 if [[ -n "${BASH_SOURCE[0]-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -104,6 +105,7 @@ phase_hardware() {
   require_cmd uname
   require_cmd awk
   require_cmd df
+  require_cmd mountpoint
 
   [[ "$(uname -m)" == "aarch64" ]] ||
     die "Requires ARM64/aarch64; found $(uname -m)"
@@ -113,7 +115,7 @@ phase_hardware() {
   [[ "${ID:-}" == "debian" && "${VERSION_ID:-}" == "13" ]] ||
     die "Requires Debian 13 (trixie); found ${PRETTY_NAME:-unknown}"
 
-  local model ram_kb ram_gb disk_gb
+  local model ram_kb ram_gb disk_gb storage_path
   model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)"
   [[ "$model" =~ Raspberry[[:space:]]+Pi ]] ||
     die "Requires a Raspberry Pi deployment; found ${model:-unknown platform}"
@@ -127,9 +129,17 @@ phase_hardware() {
     die "Requires at least ${MIN_RAM_GB}GiB RAM; found ${ram_gb}GiB"
   ok "Memory: ${ram_gb}GiB"
 
-  disk_gb="$(df -P -BG / | awk 'NR == 2 {gsub(/G/, "", $4); print $4}')"
+  [[ "$BITCOIN_DATADIR" == /* && "$BITCOIN_DATADIR" != *[[:space:]]* ]] ||
+    die "MERCURY_BITCOIN_DATADIR must be an absolute path without whitespace"
+  if [[ -z "$BITCOIN_DATADIR_EXPLICIT" ]] && ! mountpoint -q /mnt/blockchain; then
+    die "/mnt/blockchain is not a mountpoint; mount the blockchain volume or set MERCURY_BITCOIN_DATADIR explicitly"
+  fi
+  storage_path="$(dirname -- "$BITCOIN_DATADIR")"
+  [[ -d "$storage_path" ]] ||
+    die "Bitcoin data parent does not exist: $storage_path"
+  disk_gb="$(df -P -BG "$storage_path" | awk 'NR == 2 {gsub(/G/, "", $4); print $4}')"
   ((disk_gb >= MIN_DISK_GB)) ||
-    die "Requires at least ${MIN_DISK_GB}GiB free on /; found ${disk_gb}GiB"
+    die "Requires at least ${MIN_DISK_GB}GiB free on the Bitcoin volume; found ${disk_gb}GiB"
   ok "Free storage: ${disk_gb}GiB"
 }
 
@@ -148,9 +158,6 @@ phase_packages_and_layout() {
   apt-get update
   apt-get install -y --no-install-recommends \
     ca-certificates curl python3 python3-venv tar xz-utils systemd
-
-  [[ "$BITCOIN_DATADIR" == /* && "$BITCOIN_DATADIR" != *[[:space:]]* ]] ||
-    die "MERCURY_BITCOIN_DATADIR must be an absolute path without whitespace"
 
   ensure_user bitcoin "$BITCOIN_DATADIR"
   ensure_user lnd /var/lib/lnd
@@ -480,6 +487,7 @@ final_report() {
   cat <<EOF
 
 Mercury Node ${MERCURY_VERSION} installed under ${INSTALL_ROOT}.
+Bitcoin data directory: ${BITCOIN_DATADIR}
 
 Installed:
   Bitcoin Core ${BITCOIN_VERSION} (enabled, not started)
