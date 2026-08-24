@@ -826,12 +826,21 @@ async def get_magma_recommendations():
 
 
 @app.post("/api/magma/buy")
-async def buy_magma_channel(req: MagmaBuyRequest):
+async def buy_magma_channel(
+    req: MagmaBuyRequest,
+    x_mercury_cli_approval: Optional[str] = Header(default=None),
+):
     """
     Initiate a Magma channel purchase via the Amboss API.
     Requires a valid MAGMA_API_KEY (passed in request body or from server env).
     Returns the fee invoice (BOLT11) to pay to complete the channel open.
     """
+    if x_mercury_cli_approval != "confirmed":
+        raise HTTPException(
+            status_code=403,
+            detail="Magma purchases require explicit approval through the Mercury CLI",
+        )
+
     api_key = req.api_key or MAGMA_API_KEY
     if not api_key:
         raise HTTPException(

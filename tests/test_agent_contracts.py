@@ -111,6 +111,54 @@ class AgentShapingTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.status_code, 400)
 
+    def test_all_write_tools_prepare_and_require_cli_confirmation(self):
+        payloads = {
+            "channel.open": {"peer": "peer@127.0.0.1:9735", "amount_sat": 20_000},
+            "channel.close": {"channel_point": "abc:0"},
+            "channel.rebalance": {"amount_sat": 5_000},
+            "routing.fees.set": {"ppm": 100, "base_msat": 1000},
+            "magma.buy": {"offer_id": "offer-1", "size_sat": 20_000},
+        }
+        for name, payload in payloads.items():
+            result = agent.prepare_tool(name, payload)
+            self.assertEqual(result["tool"], name)
+            self.assertTrue(result["requires_confirmation"])
+            with self.assertRaises(agent.HTTPException) as raised:
+                agent.execute_tool(
+                    name,
+                    {"plan_token": result["plan_token"], "confirmed": True},
+                )
+            self.assertEqual(raised.exception.status_code, 409)
+
+    def test_plan_token_cannot_be_reused_or_crossed(self):
+        prepared = agent.prepare_tool(
+            "routing.fees.set",
+            {"ppm": 100, "base_msat": 1000},
+        )
+        with self.assertRaises(agent.HTTPException) as mismatch:
+            agent.execute_tool(
+                "magma.buy",
+                {"plan_token": prepared["plan_token"], "confirmed": True},
+            )
+        self.assertEqual(mismatch.exception.status_code, 409)
+        with self.assertRaises(agent.HTTPException) as reused:
+            agent.execute_tool(
+                "routing.fees.set",
+                {"plan_token": prepared["plan_token"], "confirmed": True},
+            )
+        self.assertEqual(reused.exception.status_code, 409)
+
+    def test_magma_endpoint_rejects_missing_cli_approval(self):
+        request = agent.MagmaBuyRequest(
+            offer_id="offer-1",
+            size_sat=20_000,
+            api_key="test-key",
+        )
+        with self.assertRaises(agent.HTTPException) as raised:
+            import asyncio
+            asyncio.run(agent.buy_magma_channel(request, None))
+        self.assertEqual(raised.exception.status_code, 403)
+
     def test_channels_shapes_active_pending_and_summary_balances(self):
         active = {
             "channels": [

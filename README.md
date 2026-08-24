@@ -124,6 +124,8 @@ Read routes are intentionally operational telemetry. `POST /api/backup`
 requires the `X-Mercury-Backup-Token` header and a configured
 `MERCURY_BACKUP_TOKEN`. `POST /api/magma/buy` requires `MAGMA_API_KEY`; it
 creates an Amboss order and returns an invoice, but does not autonomously pay it.
+The Magma endpoint additionally requires `X-Mercury-CLI-Approval: confirmed`,
+which is only sent after the CLI confirmation prompt.
 The tool routes expose the Hermes-style prepare/confirm boundary for agent
 integrations. Preparation creates a short-lived token and never broadcasts;
 write execution remains explicitly approved through the Mercury CLI.

@@ -1467,13 +1467,16 @@ def _agent_get(path):
         return None, str(e)
 
 
-def _agent_post(path, payload):
+def _agent_post(path, payload, *, cli_approved=False):
     """POST JSON to mercury-agent, return (data, error)."""
     try:
         body = json.dumps(payload).encode()
         req = urllib.request.Request(
             f"{AGENT_URL}{path}", data=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                **({"X-Mercury-CLI-Approval": "confirmed"} if cli_approved else {}),
+            },
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -1852,7 +1855,7 @@ def _cmd_magma(args):
             "offer_id": offer_id,
             "size_sat": size,
             "api_key": api_key,
-        })
+        }, cli_approved=True)
         if buy_err:
             print(f"  {R}Buy failed: {buy_err}{NC}")
             print(f"  {DIM}Check that your API key is valid and retry.{NC}")
