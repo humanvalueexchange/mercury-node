@@ -30,6 +30,7 @@ import urllib.request
 import urllib.error
 import re
 from pathlib import Path
+from mercury_cli.registry import Permission, ToolRegistry, ToolSpec
 try:
     import readline
 except ImportError:
@@ -219,6 +220,8 @@ W   = "\033[1;37m"
 DIM = "\033[2m"
 NC  = "\033[0m"
 
+TOOL_REGISTRY = ToolRegistry()
+
 # ── LND wrapper ───────────────────────────────────────────────────────────────
 
 def lncli(*args, timeout=15):
@@ -387,6 +390,11 @@ def cmd_status(args):
                         f"remote {c.get('remote_balance')} SAT, cap {c.get('capacity')} SAT\n")
         ctx += f"Services: {', '.join(k for k, v in services.items() if v)} running\n"
         _ai_insight(ctx, "status")
+
+
+def cmd_status_tool(args):
+    """Run node status through the shared read-only tool registry."""
+    return TOOL_REGISTRY.execute("node.status", args)
 
 
 def cmd_channels(args):
@@ -4759,7 +4767,7 @@ def cmd_shell(args=None):
                 "rebalance", "channel", "nodes", "transactions", "fees", "payments", "routing", "version", "help", "exit", "quit", "clear", "cls", "post-share", "suggest", "generate-backlog", "generate-idea", "vote", "rank-backlog", "recommend", "tonight"}
 
     dispatch = {
-        "status":    cmd_status,
+        "status":    cmd_status_tool,
         "channels":  cmd_channels,
         "invoices":  cmd_invoices,
         "sync":      cmd_sync,
@@ -5191,9 +5199,9 @@ def main():
     args = parser.parse_args()
 
     dispatch = {
-        "status":   cmd_status,
+        "status":   cmd_status_tool,
         "channels": cmd_channels,
-        "invoices": cmd_invoice,
+        "invoices": cmd_invoices,
         "sync":     cmd_sync,
         "peers":    cmd_peers,
         "backup":   cmd_backup,
@@ -5233,9 +5241,20 @@ def main():
             dispatch[args.command](args)
         except KeyboardInterrupt:
             print()
+
     else:
         parser.print_help()
         sys.exit(1)
+
+
+TOOL_REGISTRY.register(
+    ToolSpec(
+        name="node.status",
+        description="Read the current Mercury node status",
+        permission=Permission.READ_ONLY,
+        handler=cmd_status,
+    )
+)
 
 
 if __name__ == "__main__":
