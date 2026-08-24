@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mercury Node CLI — v0.3
+Mercury Node CLI — v0.5
 Terminal-native control for your sovereign Bitcoin Lightning node.
 
 Usage:
@@ -29,13 +29,14 @@ import urllib.error
 from datetime import datetime, timezone
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-MERCURY_VERSION = "0.4.0"
+MERCURY_VERSION = "0.5.5"
 LND_DIR = "/var/lib/lnd"
 LND_USER = "lnd"
 AGENT_URL = "http://localhost:8088"
 OLLAMA_URL = os.getenv("MERCURY_OLLAMA_URL", "http://10.0.0.79:11434")
 LOCAL_LLM_URL   = os.getenv("MERCURY_LOCAL_LLM_URL", "http://127.0.0.1:8089")
-OLLAMA_MODEL = os.getenv("MERCURY_OLLAMA_MODEL", "qwen2.5:14b")
+LOCAL_LLM_MODEL = os.getenv("MERCURY_LOCAL_LLM_MODEL", "Qwen3.8-2B-Distill-Q4_K_M.gguf")
+OLLAMA_MODEL = os.getenv("MERCURY_OLLAMA_MODEL", "qwen3.8:4b")
 
 # ANSI colors
 R   = "\033[0;31m"
@@ -561,9 +562,9 @@ def _ask_dgx(question, system_prompt):
 
 
 def _ask_local(question, system_prompt):
-    """Stream answer from local Qwen2.5-3B via llama.cpp OpenAI-compatible server."""
+    """Stream answer from the configured local model via llama.cpp."""
     payload = json.dumps({
-        "model": "phi-3.5-mini",
+        "model": LOCAL_LLM_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": question},
@@ -609,13 +610,13 @@ def cmd_ask(args):
         "operated by Human Value Exchange (HVE). You have real-time access to the node's "
         "telemetry. Answer concisely and practically. Always think in SATs. "
         "You run locally on a Raspberry Pi 5 with a Hailo-8L AI accelerator. "
-        "Your current LLM is Qwen2.5-3B-Instruct, running fully on-device. "
+        f"Your current LLM is {LOCAL_LLM_MODEL}, running fully on-device. "
         "You are self-contained and do not depend on any external system. "
         "Recommend actions when useful but note that human approval is required before any funds move.\n"
         "Current node data:\n" + node_ctx
     )
 
-    # Try local Qwen2.5-3B first (sovereign, no external dependency)
+    # Try the local model first (sovereign, no external dependency)
     local_ok = False
     try:
         urllib.request.urlopen(f"{LOCAL_LLM_URL}/v1/models", timeout=2)
@@ -624,7 +625,7 @@ def cmd_ask(args):
         pass
 
     if local_ok:
-        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — Qwen2.5-3B){NC}")
+        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — {LOCAL_LLM_MODEL}){NC}")
         print(f"{DIM}{'─' * 55}{NC}")
         print(f"  {W}Q:{NC} {question}\n")
         if _ask_local(question, system_prompt):
@@ -777,7 +778,7 @@ def cmd_health(args):
         ("nbxplorer",      "NBXplorer"),
         ("nginx",          "Nginx"),
         ("mercury-agent",  "Mercury Agent"),
-        ("mercury-llm",    "Mercury LLM (Qwen2.5-3B)"),
+        ("mercury-llm",    f"Mercury LLM ({LOCAL_LLM_MODEL})"),
     ]
 
     svc_status = {}
@@ -917,16 +918,16 @@ def cmd_health(args):
     row("Mercury Agent API", OK if data else ERR,
         f"http://localhost:8088  {'responding' if data else err}")
 
-    # Local LLM (Qwen2.5-3B)
+    # Local LLM
     try:
         req = urllib.request.Request(
             f"{LOCAL_LLM_URL}/v1/models",
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as r:
-            row("Local LLM (Qwen2.5-3B)", OK, f"http://127.0.0.1:8089  responding")
+            row("Local LLM", OK, f"http://127.0.0.1:8089  responding")
     except urllib.error.URLError:
-        row("Local LLM (Qwen2.5-3B)", WRN, "not responding — sudo systemctl start mercury-llm")
+        row("Local LLM", WRN, "not responding — sudo systemctl start mercury-llm")
 
     # DGX Spark Ollama
     try:

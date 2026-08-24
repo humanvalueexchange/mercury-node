@@ -3,6 +3,8 @@ Description=Mercury Agent API Service
 Documentation=https://github.com/HansHWestphal/mercury-node
 After=network-online.target lnd.service
 Requires=lnd.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -12,8 +14,6 @@ WorkingDirectory=/opt/mercury/agent
 ExecStart=/opt/mercury/venv/bin/python main.py
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 # Never take down Bitcoin stack if agent crashes
 KillMode=control-group

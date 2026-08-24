@@ -1,22 +1,22 @@
 [Unit]
-Description=Mercury Local LLM (Qwen2.5-3B-Instruct)
+Description=Mercury Local LLM (Qwen3.8-2B-Distill)
 After=network.target
 PartOf=mercury-agent.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=root
-ExecStart=/opt/mercury/venv/bin/python -m llama_cpp.server \
-  --model /opt/mercury/models/qwen2.5-3b-instruct-q4_k_m.gguf \
+ExecStart=/opt/mercury/llama.cpp/bin/llama-server \
+  --model /opt/mercury/models/Qwen3.8-2B-Distill-Q4_K_M.gguf \
   --host 127.0.0.1 \
   --port 8089 \
-  --n_ctx 8192 \
-  --n_threads 4 \
-  --chat_format chatml
+  --ctx-size 32768 \
+  --threads 4 \
+  --reasoning off
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target

@@ -93,7 +93,7 @@ The current host is not produced by the repository's installer as currently comm
    describe Hailo-8L and Phi-3.5-mini as the primary stack.
 3. The live Bitcoin data directory is `/mnt/blockchain`; the installer assumes `/var/lib/bitcoind`.
 4. The live software versions are newer than the pinned installer versions.
-5. The live `mercury-agent` is version 0.5.5; the repository source identifies itself as 0.3.0.
+5. The live `mercury-agent` is version 0.5.5; the repository source has now been aligned to 0.5.5.
 6. The repository's installer still contains skeleton steps for NBXplorer, BTCPay, systemd
    units, and deployment staging.
 

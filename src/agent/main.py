@@ -1,5 +1,5 @@
 """
-Mercury Agent — v0.3
+Mercury Agent — v0.5
 FastAPI service exposing Mercury node status + Magma liquidity intelligence for the AI agent layer.
 
 Endpoints:
@@ -39,7 +39,7 @@ MAGMA_API_KEY = os.getenv("MAGMA_API_KEY", "")  # optional — anonymous access 
 LND_DIR = "/var/lib/lnd"
 LND_USER = "lnd"
 BACKUP_DIR = "/var/lib/mercury/backups"
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.5.5"
 
 app = FastAPI(
     title="Mercury Agent API",
