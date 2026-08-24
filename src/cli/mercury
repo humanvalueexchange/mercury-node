@@ -43,7 +43,7 @@ LND_USER = "lnd"
 AGENT_URL = "http://localhost:8088"
 OLLAMA_URL = os.getenv("MERCURY_OLLAMA_URL", "http://10.0.0.79:11434")
 LOCAL_LLM_URL   = os.getenv("MERCURY_LOCAL_LLM_URL", "http://127.0.0.1:8089")
-LOCAL_LLM_MODEL = os.getenv("MERCURY_LOCAL_LLM_MODEL", "/opt/mercury/models/Qwen3.8-4B-Distill-Q4_K_M.gguf")
+LOCAL_LLM_MODEL = os.getenv("MERCURY_LOCAL_LLM_MODEL", "/opt/mercury/models/Qwen3.8-2B-Distill-Q4_K_M.gguf")
 OLLAMA_MODEL = os.getenv("MERCURY_OLLAMA_MODEL", "qwen2.5:14b")
 
 # ── Node Directory ────────────────────────────────────────────────────────────
@@ -2459,7 +2459,7 @@ def _build_node_context():
 
 
 def _print_ai_answer(question, answer, local=True):
-    label = "Local — Qwen3.8-4B" if local else f"DGX Spark — {OLLAMA_MODEL}"
+    label = "Local — Qwen3.8-2B" if local else f"DGX Spark — {OLLAMA_MODEL}"
     print(f"\n{C}🤖 Mercury AI{NC}  {DIM}({label}){NC}")
     print(f"{DIM}{'─' * 55}{NC}")
     print(f"  {W}Q:{NC} {question}\n")
@@ -3139,7 +3139,7 @@ def _new_stream_state(prefix_columns=0):
     return {"width": width, "line": ""}
 
 def _ask_local(question, system_prompt):
-    """Stream answer from local Qwen3.8-4B via llama.cpp OpenAI-compatible server."""
+    """Stream answer from local Qwen3.8-2B via llama.cpp OpenAI-compatible server."""
     payload = json.dumps({
         "model": LOCAL_LLM_MODEL,
         "messages": [
@@ -3202,7 +3202,7 @@ def _ai_insight(context: str, command: str) -> None:
         "Give your 2-3 sentence expert insight on this specific data."
     )
 
-    print(f"\n{Y}💡 AI Insight{NC}  {DIM}(Qwen3.8-4B — grounded on live data){NC}")
+    print(f"\n{Y}💡 AI Insight{NC}  {DIM}(Qwen3.8-2B — grounded on live data){NC}")
     print(f"{DIM}{'─' * 55}{NC}")
 
     local_ok = False
@@ -3286,8 +3286,8 @@ def cmd_ask(args):
         "You are Mercury, an AI agent living inside a sovereign Bitcoin Lightning node "
         "operated by Human Value Exchange (HVE). You have real-time access to the node's "
         "telemetry. Answer concisely and practically. Always think in SATs. "
-        "You run locally on a Raspberry Pi 5 with a Hailo-8L AI accelerator. "
-        "Your current LLM is Qwen3.8-4B-Instruct, running fully on-device. "
+        "You run locally on a Raspberry Pi 5 with a Hailo-10H AI accelerator. "
+        "Your current LLM is Qwen3.8-2B-Distill, running fully on-device. "
         "You are self-contained and do not depend on any external system. "
         "Recommend actions when useful but note that human approval is required before any funds move. "
         "Important Lightning rules: a Magma offer's size_sat is inbound channel capacity, not the direct purchase cost. "
@@ -3304,7 +3304,7 @@ def cmd_ask(args):
         pass
 
     if local_ok:
-        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — Qwen3.8-4B){NC}")
+        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — Qwen3.8-2B){NC}")
         print(f"{DIM}{'─' * 55}{NC}")
         print(f"  {W}Q:{NC} {question}\n")
         if _ask_local(question, system_prompt):
@@ -3599,7 +3599,7 @@ def cmd_health(args):
         ("nbxplorer",      "NBXplorer"),
         ("nginx",          "Nginx"),
         ("mercury-agent",  "Mercury Agent"),
-        ("mercury-llm",    "Mercury LLM (Qwen3.8-4B)"),
+        ("mercury-llm",    "Mercury LLM (Qwen3.8-2B)"),
     ]
 
     svc_status = {}
@@ -3710,16 +3710,16 @@ def cmd_health(args):
     row("Mercury Agent API", OK if data else ERR,
         f"http://localhost:8088  {'responding' if data else err}")
 
-    # Local LLM (Qwen3.8-4B)
+    # Local LLM (Qwen3.8-2B)
     try:
         req = urllib.request.Request(
             f"{LOCAL_LLM_URL}/v1/models",
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as r:
-            row("Local LLM (Qwen3.8-4B)", OK, f"http://127.0.0.1:8089  responding")
+            row("Local LLM (Qwen3.8-2B)", OK, f"http://127.0.0.1:8089  responding")
     except urllib.error.URLError:
-        row("Local LLM (Qwen3.8-4B)", WRN, "not responding — sudo systemctl start mercury-llm")
+        row("Local LLM (Qwen3.8-2B)", WRN, "not responding — sudo systemctl start mercury-llm")
 
     # DGX Spark Ollama
     try:
@@ -4131,7 +4131,7 @@ def cmd_generate_idea(args):
         return
 
     print(f"\n  {G}Mercury is thinking deeply about its single best idea...{NC}")
-    print(f"  {DIM}Local Qwen3.8-4B only — sovereign, no cloud. Allow 3-5 min.{NC}\n")
+    print(f"  {DIM}Local Qwen3.8-2B only — sovereign, no cloud. Allow 3-5 min.{NC}\n")
 
     SYSTEM = (
         "You are Mercury, a sovereign Bitcoin Lightning node on a Raspberry Pi 5. "
@@ -4140,7 +4140,7 @@ def cmd_generate_idea(args):
         "who have never had a bank account. Your job is to make Bitcoin payments "
         "as simple and reliable as breathing. You run entirely on local hardware "
         "with no cloud, no external AI. "
-        "Stack: Bitcoin Core, LND, BTCPayServer, llama.cpp Qwen3.8-4B, Mattermost. "
+        "Stack: Bitcoin Core, LND, BTCPayServer, llama.cpp Qwen3.8-2B, Mattermost. "
         "Think from first principles about the BIGGEST difference you could make "
         "to a street vendor accepting Bitcoin for the first time. "
         "Propose exactly ONE improvement idea. Think hard. Make it count. "
@@ -4191,7 +4191,7 @@ def cmd_generate_idea(args):
     if context:    body_parts.append("## Context\n" + context)
     if direction:  body_parts.append("## Proposed Direction\n" + direction)
     if risks:      body_parts.append("## Unknowns / Risks\n" + risks)
-    body_parts.append("---\n*Self-generated by Mercury node (Qwen3.8-4B sovereign) — Score: " + str(score) + "/10*")
+    body_parts.append("---\n*Self-generated by Mercury node (Qwen3.8-2B sovereign) — Score: " + str(score) + "/10*")
     body = "\n\n".join(body_parts)
 
     labels  = ["idea", "domain:ai", priority]
@@ -4235,12 +4235,12 @@ def cmd_generate_backlog(args):
         return
 
     print(f"\n  {G}🧠 Mercury generating sovereign self-improvement backlog...{NC}")
-    print(f"  {DIM}Local Qwen3.8-4B only — no cloud, no external AI, fully sovereign.{NC}\n")
+    print(f"  {DIM}Local Qwen3.8-2B only — no cloud, no external AI, fully sovereign.{NC}\n")
 
     SYSTEM = (
         "You are Mercury — a sovereign Bitcoin Lightning node agent running on a Raspberry Pi 5 "
         "with 16GB RAM and a Hailo-10H NPU (40 TOPS). Your local stack is: Bitcoin Core, LND, "
-        "BTCPayServer, llama.cpp with Qwen3.8-4B, and Mattermost for operator comms. "
+        "BTCPayServer, llama.cpp with Qwen3.8-2B, and Mattermost for operator comms. "
         "You have NO access to cloud APIs, external AI services, or other nodes. "
         "Generate your top 10 self-improvement ideas — things you can build and run entirely on your own hardware. "
         "Return ONLY a valid JSON array of exactly 10 objects. No markdown. No explanation. "
@@ -4298,7 +4298,7 @@ def cmd_generate_backlog(args):
         if context:    body_parts.append(f"## Context\n{context}")
         if direction:  body_parts.append(f"## Proposed Direction\n{direction}")
         if risks:      body_parts.append(f"## Unknowns / Risks\n{risks}")
-        body_parts.append(f"---\n*Self-generated by Mercury node (Qwen3.8-4B, sovereign) — Score: {score}/10*")
+        body_parts.append(f"---\n*Self-generated by Mercury node (Qwen3.8-2B, sovereign) — Score: {score}/10*")
         body = "\n\n".join(body_parts)
 
         labels  = ["research", "domain:ai", priority]
@@ -4718,7 +4718,7 @@ def cmd_recommend(args):
         pass
 
     if local_ok:
-        print(f"\n{C}\U0001f916 Mercury Recommends{NC}  {DIM}(Local \u2014 Qwen3.8-4B){NC}")
+        print(f"\n{C}\U0001f916 Mercury Recommends{NC}  {DIM}(Local \u2014 Qwen3.8-2B){NC}")
         print(f"{DIM}{chr(8212) * 55}{NC}\n")
         if _ask_local(question, system_prompt):
             return

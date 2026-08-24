@@ -1,5 +1,5 @@
 [Unit]
-Description=Mercury Local LLM (Qwen3.8-4B native llama.cpp)
+Description=Mercury Local LLM (Qwen3.8-2B native llama.cpp)
 After=network.target
 PartOf=mercury-agent.service
 StartLimitIntervalSec=60
