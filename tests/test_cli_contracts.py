@@ -120,6 +120,31 @@ class CliParserDispatchTests(unittest.TestCase):
         plan = cli.TOOL_REGISTRY.prepare("routing.fees.set", args)
         self.assertIsInstance(plan, cli.FeeUpdatePlan)
 
+    def test_ask_does_not_execute_invoice_writes(self):
+        with patch.object(cli, "lncli") as lncli, patch.object(
+            cli, "_print_ai_answer"
+        ) as answer:
+            cli.cmd_ask(type("Args", (), {"question": ["create", "invoice", "for", "1000", "sats"]})())
+
+        lncli.assert_not_called()
+        self.assertIn("cannot execute writes", answer.call_args.args[1])
+
+    def test_ask_payment_prepares_but_does_not_pay(self):
+        plan = cli.PayPlan("lnbc-test", 2500, "peer", "test")
+        with patch.object(cli.TOOL_REGISTRY, "prepare", return_value=plan), patch.object(
+            cli, "_print_ai_answer"
+        ) as answer, patch.object(cli, "execute_pay") as execute:
+            cli.cmd_ask(
+                type(
+                    "Args",
+                    (),
+                    {"question": ["pay", "lnbc-test"]},
+                )()
+            )
+
+        execute.assert_not_called()
+        self.assertIn("No payment was sent", answer.call_args.args[1])
+
     def test_status_parser_dispatches_with_ai_flag(self):
         with patch.object(cli, "cmd_status_tool") as handler, patch.object(
             sys, "argv", ["mercury", "status", "--ai"]

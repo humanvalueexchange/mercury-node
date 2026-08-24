@@ -3538,6 +3538,40 @@ def _ai_insight(context: str, command: str) -> None:
 
 def cmd_ask(args):
     question = " ".join(args.question)
+    lowered = question.lower()
+
+    # Natural-language requests may prepare value-moving actions, never execute them.
+    if "pay" in lowered and "ln" in lowered:
+        invoice = next((word.strip(".,") for word in question.split() if word.lower().startswith("ln")), None)
+        if invoice:
+            try:
+                plan = TOOL_REGISTRY.prepare(
+                    "payment.pay", type("Args", (), {"bolt11": invoice})()
+                )
+            except (RuntimeError, ValueError) as exc:
+                _print_ai_answer(question, f"I could not prepare that payment: {exc}")
+                return
+            _print_ai_answer(
+                question,
+                f"Payment plan prepared for {fmt_sat(plan.amount_sat)} to "
+                f"{plan.destination}. No payment was sent. Run `mercury pay {plan.bolt11}` "
+                "to review and confirm it in the CLI.",
+            )
+            return
+
+    ask_write_terms = (
+        "create invoice", "generate invoice", "make invoice", "cancel invoice",
+        "delete invoice", "remove invoice", "cancel all", "buy inbound",
+        "buy channel", "open channel", "close channel", "set fees",
+        "send ", "transfer ", "charge ", "create a payment", "pay invoice",
+    )
+    if any(term in lowered for term in ask_write_terms):
+        _print_ai_answer(
+            question,
+            "I can explain or prepare this operation, but `ask` cannot execute writes. "
+            "Use the corresponding Mercury CLI command for the confirmation prompt.",
+        )
+        return
 
     if _try_rule_based_answer(question):
         return
