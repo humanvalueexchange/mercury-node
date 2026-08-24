@@ -4,6 +4,9 @@
 **Last updated:** 2026-05-16  
 **Estimated total cost:** ~$250–320 USD
 
+> The live reference deployment has diverged from this original target BOM. See
+> [current-state.md](current-state.md) for the observed hardware and software specification.
+
 ---
 
 ## Required Components
@@ -66,8 +69,8 @@ The 27W official Pi 5 PSU is required for stable operation with NVMe + Hailo act
 | LND | MIT |
 | BTCPay Server | MIT |
 | NBXplorer | MIT |
-| Phi-3.5-mini | MIT |
-| Raspberry Pi OS | Various open-source |
+| Qwen family / llama.cpp | Various open-source licenses |
+| Debian GNU/Linux | GPL and other open-source licenses |
 
 ---
 

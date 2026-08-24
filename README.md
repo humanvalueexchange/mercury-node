@@ -49,10 +49,15 @@ rebalancing 30,000 SAT to restore routing balance.
 | Payment server | BTCPay Server |
 | Chain indexer | NBXplorer |
 | Reverse proxy | nginx |
-| AI agent brain | Phi-3.5-mini on Hailo-8L (13 TOPS, <2W) |
+| AI agent brain | Qwen family via native llama.cpp; Hailo-10H present in the reference deployment |
 | Agent API | FastAPI (mercury-agent service) |
 | CLI | `mercury` — terminal-native control |
 | Agent mesh | MCP server (agent-to-agent Lightning discovery) |
+
+> **Current reference deployment:** The operated node is documented in
+> [docs/current-state.md](docs/current-state.md). It currently runs Debian 13 on a
+> Raspberry Pi 5-class ARM64 host with Hailo-10H, Bitcoin Core 30.2.0, LND 0.20.1-beta,
+> and native llama.cpp.
 
 ---
 
@@ -77,7 +82,7 @@ rebalancing 30,000 SAT to restore routing balance.
 ## Quick Start
 
 ### 1. Flash the OS
-Flash **Raspberry Pi OS Lite (64-bit, Bookworm)** to microSD using Raspberry Pi Imager.
+Flash a supported 64-bit ARM Linux installation to the boot device using Raspberry Pi Imager.
 Enable SSH in the imager settings. Boot your Pi.
 
 ### 2. Run the installer
