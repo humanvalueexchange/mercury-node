@@ -72,7 +72,7 @@ The agent binds to localhost by default. If the authenticated backup endpoint is
 `/etc/mercury/agent.env` systemd environment file; the token is never stored in this
 repository.
 
-Static channel backups are stored under `/var/lib/lnd/backups` and are intended to be
+Static channel backups are stored under `/var/lib/mercury/backups` and are intended to be
 owned by `lnd` with restrictive permissions.
 
 All observed services were active at snapshot time:

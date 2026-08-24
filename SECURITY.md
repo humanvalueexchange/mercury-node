@@ -46,7 +46,7 @@ Mercury Node's threat model prioritizes:
 ## Static Channel Backups
 
 Static channel backups are sensitive recovery material and must be treated as secrets.
-Mercury stores them under `/var/lib/lnd/backups` with a `0700` directory and `0600` file
+Mercury stores them under `/var/lib/mercury/backups` with a `0700` directory and `0600` file
 permissions, owned by the `lnd` service account.
 
 The HTTP backup endpoint is disabled unless `MERCURY_BACKUP_TOKEN` is configured through

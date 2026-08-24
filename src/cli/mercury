@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Mercury Node CLI — v0.5
+Mercury Node CLI — v0.5.5
 Terminal-native control for your sovereign Bitcoin Lightning node.
 
 Usage:
-  mercury status                  Node health at a glance
-  mercury channels                Lightning channel overview
-  mercury invoices [--last N]     Recent payments
-  mercury sync                    Bitcoin sync progress
-  mercury logs [service]          Live log tail
-  mercury backup                  Export static channel backup
-  mercury peers                   Connected Lightning peers
-  mercury pay <bolt11>            Send a Lightning payment
-  mercury invoice <sat> [memo]    Create a Lightning invoice
-  mercury magma [offers|score|recommend]  Magma liquidity intelligence
-  mercury ask "<question>"        Ask your node anything (AI — DGX Ollama)
-  mercury version                 Show version info
+  mercury status                       Node health at a glance
+  mercury channels                     Lightning channel overview
+  mercury invoices [--last N]          Recent payments
+  mercury sync                         Bitcoin sync progress
+  mercury logs [service]               Live log tail
+  mercury backup                       Export static channel backup
+  mercury peers                        Connected Lightning peers
+  mercury pay <bolt11>                 Send a Lightning payment
+  mercury invoice <sat> [memo]         Create a Lightning invoice
+  mercury rebalance [--amount SAT]     Circular channel rebalance
+  mercury magma [offers|score|recommend|buy|status|auth]  Magma liquidity intelligence
+  mercury ask "<question>"             Ask your node anything (AI — DGX Ollama)
+  mercury version                      Show version info
 """
 
 import sys
@@ -23,20 +24,190 @@ import os
 import json
 import subprocess
 import argparse
+import shutil
 import time
 import urllib.request
 import urllib.error
+import re
+from pathlib import Path
+try:
+    import readline
+except ImportError:
+    readline = None  # readline not available on this system
 from datetime import datetime, timezone
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-MERCURY_VERSION = "0.5.5"
+MERCURY_VERSION = "0.10.0"
 LND_DIR = "/var/lib/lnd"
 LND_USER = "lnd"
 AGENT_URL = "http://localhost:8088"
 OLLAMA_URL = os.getenv("MERCURY_OLLAMA_URL", "http://10.0.0.79:11434")
 LOCAL_LLM_URL   = os.getenv("MERCURY_LOCAL_LLM_URL", "http://127.0.0.1:8089")
-LOCAL_LLM_MODEL = os.getenv("MERCURY_LOCAL_LLM_MODEL", "Qwen3.8-2B-Distill-Q4_K_M.gguf")
-OLLAMA_MODEL = os.getenv("MERCURY_OLLAMA_MODEL", "qwen3.8:4b")
+LOCAL_LLM_MODEL = os.getenv("MERCURY_LOCAL_LLM_MODEL", "/opt/mercury/models/Qwen3.8-4B-Distill-Q4_K_M.gguf")
+OLLAMA_MODEL = os.getenv("MERCURY_OLLAMA_MODEL", "qwen2.5:14b")
+
+# ── Node Directory ────────────────────────────────────────────────────────────
+# Well-known routing nodes — referenced by short alias in `channel open` and `nodes`
+NODE_DIRECTORY = {
+    "acinq": {
+        "alias": "ACINQ",
+        "uri":   "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f@3.33.236.230:9735",
+        "min_sat": 400_000,
+        "note": "Tier-1 routing node — Phoenix & Breez backend",
+    },
+    "wos": {
+        "alias": "Wallet of Satoshi",
+        "uri":   "035e4ff418fc8b5554c5d9eea66396c227bd429a3251c8cbc711002ba215bfc226@170.75.163.209:9735",
+        "min_sat": 200_000,
+        "note": "Popular custodial wallet — high connectivity",
+    },
+    "boltz": {
+        "alias": "Boltz",
+        "uri":   "026165850492521f4ac8abd9bd8088123446d126f648ca35e60f88177dc149ceb2@143.202.162.204:9735",
+        "min_sat": 5_000_000,
+        "note": "Submarine swap exchange — high min channel",
+    },
+    "lqwd": {
+        "alias": "LQwD-Canada",
+        "uri":   "0364913d18a19c671bb36dd04d6ad5be0fe8f2894314c36a9db3f03c2d414907e1@192.243.215.102:9735",
+        "min_sat": 2_000_000,
+        "note": "Professional liquidity provider",
+    },
+    "coinduit": {
+        "alias": "Coinduit",
+        "uri":   "024c08d7cded0993167094b1b941ec58ff594951c94094e916220f26dc2055f5ea@54.244.234.100:20495",
+        "min_sat": 100_000,
+        "note": "Active Mercury peer — inbound liquidity provider",
+    },
+    "satoshi17": {
+        "alias": "Satoshi 17",
+        "uri":   "03d6749842cabfbfbe386b73d2e34294aef89fb816e40e59e42109d830ff5ee89d@54.214.32.132:20236",
+        "min_sat": 100_000,
+        "note": "Active Mercury peer — well-connected routing node",
+    },
+}
+
+def resolve_node(target):
+    """Resolve a node alias or raw pubkey@host:port URI.
+    Returns (uri, display_name) or (None, error_msg).
+    """
+    key = target.strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    # Check directory by normalized key
+    for k, info in NODE_DIRECTORY.items():
+        if key == k or key == info["alias"].lower().replace(" ", "").replace("-", ""):
+            return info["uri"], info["alias"]
+    # Fall back to raw URI if it looks like pubkey@host:port
+    if "@" in target and ":" in target:
+        display = target[:16] + "..." + target.split("@")[1]
+        return target, display
+    return None, f"Unknown node '{target}'. Run `nodes` to see the directory."
+
+
+def read_bitcoind_datadir():
+    """Best-effort detection of the live Bitcoin Core datadir from systemd."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", "-p", "ExecStart", "bitcoind"],
+            capture_output=True, text=True, timeout=5
+        )
+        line = result.stdout.strip()
+        match = re.search(r"(?:^|\s)-datadir=(\S+)", line)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+
+    for candidate in ("/mnt/blockchain/bitcoin", "/var/lib/bitcoin", "/data/bitcoin"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def bitcoin_cli(*args, timeout=15):
+    """Run bitcoin-cli against Mercury's active datadir."""
+    datadir = read_bitcoind_datadir()
+    cmd = ["bitcoin-cli"]
+    if datadir:
+        cmd.append(f"-datadir={datadir}")
+    cmd += list(args)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            return None, result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        return json.loads(result.stdout), None
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    except json.JSONDecodeError as e:
+        return None, f"json error: {e}"
+    except FileNotFoundError:
+        return None, "bitcoin-cli not in PATH"
+    except Exception as e:
+        return None, str(e)
+
+
+def backup_export_dirs():
+    """Locations where exported operator backups may live."""
+    return [Path("/var/lib/mercury/backups"), Path.home() / ".mercury" / "backups"]
+
+
+def backup_status():
+    """Return best available channel-backup freshness visible to the CLI user."""
+    export_files = []
+    for export_dir in backup_export_dirs():
+        try:
+            if export_dir.is_dir():
+                export_files.extend(str(p) for p in export_dir.glob("channels-*.bak"))
+        except Exception:
+            continue
+
+    if export_files:
+        export_files = sorted(export_files, key=os.path.getmtime, reverse=True)
+        latest = export_files[0]
+        age_h = round((time.time() - os.path.getmtime(latest)) / 3600, 1)
+        return {
+            "warn": age_h > 24,
+            "detail": f"{os.path.basename(latest)}  exported {age_h}h ago",
+        }
+
+    data, err = lncli("exportchanbackup", "--all")
+    if data:
+        chan_points = (data.get("multi_chan_backup") or {}).get("chan_points", [])
+        count = len(chan_points)
+        suffix = "channel" if count == 1 else "channels"
+        return {
+            "warn": True,
+            "detail": f"LND SCB available for {count} {suffix} — run backup to export off-device",
+        }
+
+    return {
+        "warn": True,
+        "detail": f"unable to confirm backup: {err or 'unknown error'}",
+    }
+
+
+def ssh_password_auth_disabled():
+    """Best-effort check of sshd password auth using readable config files only."""
+    try:
+        ssh_files = [Path("/etc/ssh/sshd_config")]
+        ssh_files.extend(sorted(Path("/etc/ssh/sshd_config.d").glob("*.conf")))
+        password_auth = None
+        for ssh_file in ssh_files:
+            if not ssh_file.exists():
+                continue
+            try:
+                raw_lines = ssh_file.read_text().splitlines()
+            except PermissionError:
+                continue
+            for raw_line in raw_lines:
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].lower() == "passwordauthentication":
+                    password_auth = parts[1].lower() == "yes"
+        return False if password_auth is None else not password_auth
+    except Exception:
+        return None
 
 # ANSI colors
 R   = "\033[0;31m"
@@ -202,18 +373,44 @@ def cmd_status(args):
     print(f"  {DIM}Uptime   {NC} {get_uptime()}")
     print(f"{DIM}{'─' * 45}{NC}\n")
 
+    if getattr(args, 'ai', False):
+        ctx = ""
+        if info:
+            ctx += f"Node: {info.get('alias')}, block {info.get('block_height')}, synced: {info.get('synced_to_chain')}\n"
+            ctx += f"Channels: {info.get('num_active_channels')} active, {info.get('num_pending_channels')} pending\n"
+        if wallet:
+            ctx += f"Wallet: {wallet.get('confirmed_balance')} SAT confirmed, {wallet.get('unconfirmed_balance')} SAT pending\n"
+        if channels:
+            for c in channels.get("channels", []):
+                alias = c.get("peer_alias", "?")
+                ctx += (f"Channel with {alias}: local {c.get('local_balance')} SAT, "
+                        f"remote {c.get('remote_balance')} SAT, cap {c.get('capacity')} SAT\n")
+        ctx += f"Services: {', '.join(k for k, v in services.items() if v)} running\n"
+        _ai_insight(ctx, "status")
+
 
 def cmd_channels(args):
     channels, err = lncli("listchannels")
     pending, _ = lncli("pendingchannels")
 
-    print(f"\n{W}Open Lightning Channels{NC}")
-    print(f"{DIM}{'─' * 55}{NC}")
+    # Get forwarding history for fee calculations (last 30 days)
+    fwd_data, _ = lncli("fwdinghistory", "--start_time=-30d", "--max_events=10000")
+    fee_by_chan = {}
+    if fwd_data:
+        for event in fwd_data.get("forwarding_events", []):
+            chan_in = event.get("chan_id_in")
+            chan_out = event.get("chan_id_out")
+            fee = int(event.get("fee_msat", 0)) / 1000  # convert to sats
+            fee_by_chan[chan_in] = fee_by_chan.get(chan_in, 0) + fee
+            fee_by_chan[chan_out] = fee_by_chan.get(chan_out, 0) + fee
+
+    print(f"\n{W}Lightning Channels{NC}")
+    print(f"{DIM}{'─' * 70}{NC}")
 
     if channels:
         ch_list = channels.get("channels", [])
         if not ch_list:
-            print(f"  {Y}No open channels.{NC}")
+            print(f"  {Y}No active channels.{NC}")
         else:
             for c in ch_list:
                 local = int(c["local_balance"])
@@ -221,19 +418,61 @@ def cmd_channels(args):
                 remote = int(c["remote_balance"])
                 pct, color = fmt_pct(local, capacity)
                 active = c.get("active", False)
+                chan_id = c.get("chan_id", "")
+
+                # Get peer alias
                 peer = c.get("remote_pubkey", "")[:20] + "..."
                 alias_info, _ = lncli("getnodeinfo", f"--pub_key={c['remote_pubkey']}")
                 alias = alias_info.get("node", {}).get("alias", peer) if alias_info else peer
 
+                # Calculate age
+                lifetime_sec = int(c.get("lifetime", 0))
+                if lifetime_sec < 86400:  # < 1 day
+                    age_str = f"{lifetime_sec // 3600}h"
+                elif lifetime_sec < 86400 * 30:  # < 30 days
+                    age_str = f"{lifetime_sec // 86400}d"
+                else:  # months
+                    age_str = f"{lifetime_sec // (86400 * 30)}mo"
+
+                # Get fees earned
+                fees_earned = fee_by_chan.get(chan_id, 0)
+                fees_str = fmt_sat(int(fees_earned)) if fees_earned > 0 else f"{DIM}0 SAT{NC}"
+
+                # Calculate health score (0-100)
+                # Factors: balance distribution (40pts), activity (30pts), uptime (30pts)
+                balance_score = 40 - abs(50 - pct) * 0.8  # best at 50/50
+                uptime_pct = (int(c.get("uptime", 0)) / lifetime_sec * 100) if lifetime_sec > 0 else 0
+                uptime_score = min(uptime_pct * 0.3, 30)
+                num_updates = int(c.get("num_updates", 0))
+                activity_score = min(num_updates / 10 * 30, 30)  # max at 10+ updates
+                health = int(balance_score + uptime_score + activity_score)
+
+                # Health indicator
+                if health >= 80:
+                    health_icon = f"{G}●{NC}"
+                    health_label = f"{G}{health}{NC}"
+                elif health >= 60:
+                    health_icon = f"{Y}●{NC}"
+                    health_label = f"{Y}{health}{NC}"
+                else:
+                    health_icon = f"{R}●{NC}"
+                    health_label = f"{R}{health}{NC}"
+
                 dot = f"{G}●{NC}" if active else f"{R}●{NC}"
                 b = bar(pct)
-                print(f"\n  {dot} {W}{alias}{NC}")
+
+                print(f"\n  {dot} {W}{alias}{NC}  {DIM}(age: {age_str}, health: {health_label}/100){NC}")
                 print(f"     {color}{b}{NC} {pct:.0f}%")
                 print(f"     Local {color}{fmt_sat(local)}{NC}  Remote {DIM}{fmt_sat(remote)}{NC}  Cap {DIM}{fmt_sat(capacity)}{NC}")
+                print(f"     Fees earned (30d): {fees_str}  Updates: {DIM}{num_updates}{NC}")
+
+                # Smart recommendations
                 if pct < 20:
-                    print(f"     {Y}⚠ Low outbound — consider rebalancing{NC}")
+                    print(f"     {Y}⚠ Low outbound — consider spending or rebalancing{NC}")
                 elif pct > 80:
-                    print(f"     {Y}⚠ Low inbound — consider rebalancing{NC}")
+                    print(f"     {Y}⚠ Low inbound — buy inbound liquidity or open second channel{NC}")
+                elif health < 60:
+                    print(f"     {Y}⚠ Low health score — check peer connectivity{NC}")
 
     # Pending channels
     if pending:
@@ -245,17 +484,49 @@ def cmd_channels(args):
                 local = int(ch.get("local_balance", 0))
                 capacity = int(ch.get("capacity", 0))
                 peer = ch.get("remote_node_pub", "")[:20] + "..."
-                print(f"  {Y}⏳{NC} {peer}  {fmt_sat(local)} / {fmt_sat(capacity)}  {DIM}(awaiting 3 confirmations){NC}")
+                print(f"  {Y}⏳{NC} {peer}  {fmt_sat(local)} / {fmt_sat(capacity)}  {DIM}(awaiting confirmations){NC}")
 
-    print(f"\n{DIM}{'─' * 55}{NC}\n")
+    print(f"\n{DIM}{'─' * 70}{NC}\n")
+
+    if getattr(args, 'ai', False):
+        ctx = ""
+        if channels:
+            for c in channels.get("channels", []):
+                alias = c.get("peer_alias", "?")
+                local = c.get("local_balance", 0)
+                remote = c.get("remote_balance", 0)
+                cap = c.get("capacity", 0)
+                pct = round(int(local)/int(cap)*100, 1) if int(cap) else 0
+                lifetime_h = int(c.get("lifetime", 0)) // 3600
+                fees_earned = fee_by_chan.get(c.get("chan_id", ""), 0)
+                ctx += (f"Channel with {alias}: {local} SAT local / {remote} SAT remote / "
+                        f"{cap} SAT cap ({pct}% local), age {lifetime_h}h, "
+                        f"fees earned 30d: {int(fees_earned)} SAT\n")
+        if pending:
+            for p in pending.get("pending_open_channels", []):
+                ch = p.get("channel", {})
+                ctx += f"Pending channel: {ch.get('local_balance')} SAT / {ch.get('capacity')} SAT cap\n"
+        _ai_insight(ctx, "channels")
 
 
-def cmd_invoices(args):
-    n = getattr(args, 'last', 10)
-    data, err = lncli("listinvoices", "--reversed", f"--num_max_invoices={n}")
+    # Parse filter flags
+    show_recent = getattr(args, 'recent', False)
+    show_pending = getattr(args, 'pending', False)
+    n = getattr(args, 'last', 20 if (show_recent or show_pending) else 10)
 
-    print(f"\n{W}Recent Invoices{NC} {DIM}(last {n}){NC}")
-    print(f"{DIM}{'─' * 55}{NC}")
+    # Fetch invoices — default backward pagination returns most-recent first (LND 0.20+)
+    data, err = lncli("listinvoices", f"--max_invoices={n}")
+
+    # Determine title
+    if show_pending:
+        title = f"{W}Pending Invoices{NC}"
+    elif show_recent:
+        title = f"{W}Recent Invoices{NC} {DIM}(last {n}){NC}"
+    else:
+        title = f"{W}Invoices{NC} {DIM}(last {n}){NC}"
+
+    print(f"\n{title}")
+    print(f"{DIM}{'─' * 70}{NC}")
 
     if not data:
         print(f"  {R}Could not fetch invoices{NC}")
@@ -264,29 +535,66 @@ def cmd_invoices(args):
     invoices = data.get("invoices", [])
     if not invoices:
         print(f"  {DIM}No invoices yet.{NC}")
+        print(f"  {DIM}Create one: mercury invoice <sat> [memo]{NC}")
+        print(f"  {DIM}POS charge:  mercury charge <amount_sats> [item]{NC}")
     else:
-        for inv in invoices:
-            state = inv.get("state", "UNKNOWN")
-            amt = int(inv.get("value", 0))
-            memo = inv.get("memo", "") or DIM + "(no memo)" + NC
-            settled_at = inv.get("settle_date", "0")
+        # Filter if needed
+        if show_pending:
+            invoices = [inv for inv in invoices if inv.get("state") == "OPEN"]
+        elif show_recent:
+            invoices = [inv for inv in invoices if inv.get("state") == "SETTLED"]
 
-            if state == "SETTLED":
-                icon = f"{G}✅{NC}"
-                ts = datetime.fromtimestamp(int(settled_at), tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-                color = G
-            elif state == "OPEN":
-                icon = f"{Y}⏳{NC}"
-                ts = "pending"
-                color = Y
-            else:
-                icon = f"{DIM}✗{NC}"
-                ts = "expired"
-                color = DIM
+        if not invoices:
+            if show_pending:
+                print(f"  {DIM}No pending invoices.{NC}")
+            elif show_recent:
+                print(f"  {DIM}No recent settled invoices.{NC}")
+        else:
+            # Group stats
+            total_settled = sum(int(inv.get("value", 0)) for inv in invoices if inv.get("state") == "SETTLED")
+            total_pending = sum(int(inv.get("value", 0)) for inv in invoices if inv.get("state") == "OPEN")
 
-            print(f"  {icon} {color}{fmt_sat(amt)}{NC}  {DIM}{ts}{NC}  {memo}")
+            for inv in invoices:
+                state = inv.get("state", "UNKNOWN")
+                amt = int(inv.get("value", 0))
+                memo = inv.get("memo", "") or f"{DIM}(no memo){NC}"
+                settled_at = inv.get("settle_date", "0")
+                created_at = inv.get("creation_date", "0")
 
-    print(f"\n{DIM}{'─' * 55}{NC}\n")
+                if state == "SETTLED":
+                    icon = f"{G}✅{NC}"
+                    ts = datetime.fromtimestamp(int(settled_at), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    color = G
+                elif state == "OPEN":
+                    icon = f"{Y}⏳{NC}"
+                    created = datetime.fromtimestamp(int(created_at), tz=timezone.utc)
+                    age_sec = (datetime.now(timezone.utc) - created).total_seconds()
+                    if age_sec < 3600:
+                        age_str = f"{int(age_sec // 60)}m ago"
+                    elif age_sec < 86400:
+                        age_str = f"{int(age_sec // 3600)}h ago"
+                    else:
+                        age_str = f"{int(age_sec // 86400)}d ago"
+                    ts = f"pending ({age_str})"
+                    color = Y
+                else:
+                    icon = f"{DIM}✗{NC}"
+                    ts = "expired/canceled"
+                    color = DIM
+
+                print(f"  {icon} {color}{fmt_sat(amt)}{NC}  {DIM}{ts}{NC}")
+                if memo != f"{DIM}(no memo){NC}":
+                    print(f"     {DIM}↳ {memo}{NC}")
+
+            # Summary stats
+            if not (show_pending or show_recent):
+                print(f"\n  {DIM}Summary:{NC}")
+                if total_settled > 0:
+                    print(f"    {G}Settled: {fmt_sat(total_settled)}{NC}")
+                if total_pending > 0:
+                    print(f"    {Y}Pending: {fmt_sat(total_pending)}{NC}")
+
+    print(f"\n{DIM}{'─' * 70}{NC}\n")
 
 
 def cmd_sync(args):
@@ -314,6 +622,11 @@ def cmd_sync(args):
 
     print(f"{DIM}{'─' * 45}{NC}\n")
 
+    if getattr(args, 'ai', False):
+        ctx = (f"Bitcoin sync status: {'fully synced' if synced else 'NOT YET SYNCED'}, "
+               f"block height {block:,}, Lightning graph synced: {synced_graph}.")
+        _ai_insight(ctx, "sync")
+
 
 def cmd_peers(args):
     data, err = lncli("listpeers")
@@ -338,11 +651,23 @@ def cmd_peers(args):
 
     print(f"{DIM}{'─' * 45}{NC}\n")
 
+    if getattr(args, 'ai', False):
+        peers_list = data.get("peers", []) if data else []
+        if not peers_list:
+            ctx = "No Lightning peers connected. Node is isolated — no gossip or routing possible."
+        else:
+            ctx = f"{len(peers_list)} connected peer(s):\n"
+            for p in peers_list:
+                pk = p.get("pub_key", "")
+                ctx += (f"  Peer {pk[:20]}...: sent {p.get('sat_sent', 0)} SAT, "
+                        f"recv {p.get('sat_recv', 0)} SAT, sync_type: {p.get('sync_type', '?')}\n")
+        _ai_insight(ctx, "peers")
+
 
 def cmd_backup(args):
     ts = datetime.now().strftime("%Y%m%d-%H%M")
-    backup_dir = "/var/lib/lnd/backups"
-    path = f"{backup_dir}/channels-{ts}.bak"
+    export_dir = backup_export_dirs()[0]
+    path = export_dir / f"channels-{ts}.bak"
     data, err = lncli("exportchanbackup", "--all")
     if err:
         print(f"{R}Backup failed: {err}{NC}")
@@ -350,15 +675,15 @@ def cmd_backup(args):
     payload = json.dumps(data, indent=2).encode()
     try:
         subprocess.run(
-            ["sudo", "-u", LND_USER, "install", "-d", "-m", "700", backup_dir],
+            ["sudo", "-u", LND_USER, "install", "-d", "-m", "700", str(export_dir)],
             check=True, capture_output=True, text=True, timeout=10,
         )
         subprocess.run(
-            ["sudo", "-u", LND_USER, "tee", path],
+            ["sudo", "-u", LND_USER, "tee", str(path)],
             input=payload, check=True, capture_output=True, timeout=10,
         )
         subprocess.run(
-            ["sudo", "-u", LND_USER, "chmod", "600", path],
+            ["sudo", "-u", LND_USER, "chmod", "600", str(path)],
             check=True, capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.SubprocessError) as e:
@@ -417,6 +742,62 @@ def cmd_pay(args):
     print(f"{DIM}{'─' * 55}{NC}\n")
 
 
+
+def cmd_send(args):
+    """Send on-chain Bitcoin."""
+    address = args.address
+    amount_sat = args.amount
+
+    print(f"\n{W}On-Chain Bitcoin Payment{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  Address: {DIM}{address[:40]}...{NC}")
+    print(f"  Amount:  {W}{fmt_sat(amount_sat)}{NC}")
+
+    # Estimate fee
+    print(f"\n  {DIM}Estimating transaction fee...{NC}")
+    wallet, _ = lncli("walletbalance")
+    confirmed = int((wallet or {}).get("confirmed_balance", 0))
+
+    # Use medium priority (10 sat/vbyte)
+    fee_rate = 10
+    est_fee_sat = fee_rate * 141  # Typical P2WPKH tx size
+    total_cost = amount_sat + est_fee_sat
+
+    print(f"  Est. Fee: ~{fmt_sat(est_fee_sat)} ({fee_rate} sat/vB)")
+    print(f"  Total:    ~{fmt_sat(total_cost)}")
+    print(f"  Balance:  {fmt_sat(confirmed)}")
+
+    if confirmed < total_cost:
+        print(f"\n  {R}❌ Insufficient funds!{NC}")
+        print(f"  Need: {fmt_sat(total_cost - confirmed)} more\n")
+        return
+
+    print(f"  Remaining: ~{fmt_sat(confirmed - total_cost)}")
+
+    print(f"\n  {Y}⚠  Send {fmt_sat(amount_sat)} on-chain? [y/N]{NC} ", end="", flush=True)
+    try:
+        answer = input()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  {Y}Cancelled.{NC}\n")
+        return
+    if answer.strip().lower() != "y":
+        print(f"  {Y}Cancelled.{NC}\n")
+        return
+
+    print(f"  {DIM}Broadcasting transaction...{NC}")
+    result, err = lncli("sendcoins", f"--addr={address}", f"--amt={amount_sat}", f"--sat_per_vbyte={fee_rate}", timeout=30)
+
+    if err:
+        print(f"  {R}❌ Transaction failed: {err}{NC}\n")
+        return
+
+    txid = result.get("txid", "")
+    print(f"  {G}✅ Transaction broadcast!{NC}")
+    print(f"  TXID: {C}{txid}{NC}")
+    print(f"\n  {DIM}Waiting for confirmation (10-60 min typical){NC}")
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+
 def cmd_invoice(args):
     sat = args.sat
     memo = args.memo or ""
@@ -436,18 +817,554 @@ def cmd_invoice(args):
     if memo:
         print(f"  Memo:   {memo}")
     print(f"  Expiry: 1 hour")
+
+    # QR link — point any wallet camera at this URL
+    qr_url = _generate_web_qr(pay_req, sat, memo or f"{sat} SAT")
+    if qr_url:
+        print(f"\n  {W}Scan to pay:{NC}")
+        print(f"  {C}{qr_url}{NC}")
+
     print(f"\n  {W}BOLT11:{NC}")
-    print(f"  {C}{pay_req}{NC}")
+    print(f"  {DIM}{pay_req}{NC}")
     print(f"\n  {DIM}Hash: {r_hash[:32]}...{NC}")
     print(f"{DIM}{'─' * 55}{NC}\n")
+
+
+def cmd_deposit(args):
+    """Receive on-chain Bitcoin — generates QR code and polls for arrival."""
+    import time
+
+    amount_sat = getattr(args, "amount", None)
+
+    print(f"\n{W}Receive On-Chain Bitcoin{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
+    # Fresh native SegWit address
+    addr_data, err = lncli("newaddress", "p2wkh")
+    if err or not addr_data:
+        print(f"  {R}Failed to generate address: {err}{NC}\n")
+        return
+
+    address = addr_data.get("address", "")
+    if not address:
+        print(f"  {R}No address returned from LND{NC}\n")
+        return
+
+    # BIP-21 URI — wallet scans and pre-fills amount if provided
+    if amount_sat:
+        btc_amount = amount_sat / 1e8
+        uri = f"bitcoin:{address}?amount={btc_amount:.8f}"
+        print(f"  Amount:  {W}{fmt_sat(amount_sat)}{NC}")
+    else:
+        uri = f"bitcoin:{address}"
+
+    print(f"  Address: {W}{address}{NC}")
+
+    qr_url = _generate_btc_qr(uri, address, amount_sat)
+    if qr_url:
+        print(f"\n  {W}Scan to pay (any Bitcoin wallet):{NC}")
+        print(f"  {C}{qr_url}{NC}")
+    print(f"\n  {DIM}URI: {uri}{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  {DIM}Waiting for payment  (Ctrl+C to skip){NC}\n")
+
+    # Snapshot current balance for delta detection
+    baseline_data, _ = lncli("walletbalance")
+    baseline_confirmed   = int((baseline_data or {}).get("confirmed_balance", 0))
+    baseline_unconfirmed = int((baseline_data or {}).get("unconfirmed_balance", 0))
+
+    received_unconfirmed = False
+    try:
+        for _ in range(720):  # poll up to 1 hour
+            time.sleep(5)
+            wb, _ = lncli("walletbalance")
+            if not wb:
+                continue
+            conf   = int(wb.get("confirmed_balance", 0))
+            unconf = int(wb.get("unconfirmed_balance", 0))
+
+            if not received_unconfirmed and unconf > baseline_unconfirmed:
+                delta = unconf - baseline_unconfirmed
+                print(f"  {Y}📡 Detected! +{fmt_sat(delta)} unconfirmed — waiting for block confirmation...{NC}")
+                # Find the TXID of the incoming unconfirmed tx and show mempool link
+                txns_data, _ = lncli("listchaintxns")
+                if txns_data:
+                    txns = txns_data.get("transactions", [])
+                    # Most recent incoming tx with 0 confirmations
+                    for tx in reversed(txns):
+                        if int(tx.get("num_confirmations", 1)) == 0 and int(tx.get("amount", 0)) > 0:
+                            txid = tx.get("tx_hash", "")
+                            if txid:
+                                print(f"  {C}🔍 Track on mempool: https://mempool.space/tx/{txid}{NC}")
+                            break
+                received_unconfirmed = True
+
+            if conf > baseline_confirmed:
+                delta = conf - baseline_confirmed
+                print(f"  {G}✅ Confirmed! +{fmt_sat(delta)} received on-chain{NC}")
+                print(f"  {DIM}New on-chain balance: {fmt_sat(conf)}{NC}")
+                print(f"{DIM}{'─' * 55}{NC}\n")
+                return
+    except KeyboardInterrupt:
+        pass
+
+    print(f"\n  {Y}Stopped watching — address is still valid, funds will arrive when the tx confirms.{NC}\n")
+
+
+def _generate_btc_qr(uri, address, amount_sat):
+    """Generate Bitcoin on-chain QR page — returns URL."""
+    import subprocess
+    import os
+    import socket
+    import time
+
+    web_dir = "/tmp/mercury_qr"
+    os.makedirs(web_dir, exist_ok=True)
+
+    slug = "deposit_btc"
+    qr_file   = f"{web_dir}/{slug}.png"
+    html_file = f"{web_dir}/{slug}.html"
+
+    cmd = ["qrencode", "-s", "10", "-m", "2", "-l", "H", "-o", qr_file, uri]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        amount_html = f"<div class='amount'>{amount_sat:,}<span class='currency'>SAT</span></div>" if amount_sat else ""
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bitcoin Deposit</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            background: #1a1a1a;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .card {{
+            background: white;
+            border-radius: 16px;
+            padding: 48px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            text-align: center;
+        }}
+        .header {{
+            border-bottom: 3px solid #f7931a;
+            padding-bottom: 24px;
+            margin-bottom: 32px;
+        }}
+        .icon {{ font-size: 40px; margin-bottom: 8px; }}
+        .merchant {{
+            font-size: 14px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 8px;
+        }}
+        .title {{
+            font-size: 20px;
+            color: #333;
+            font-weight: 700;
+        }}
+        .amount {{
+            font-size: 56px;
+            font-weight: 700;
+            color: #f7931a;
+            margin: 24px 0;
+            line-height: 1;
+        }}
+        .currency {{
+            font-size: 24px;
+            color: #999;
+            font-weight: 400;
+            margin-left: 8px;
+        }}
+        .address-label {{
+            font-size: 12px;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }}
+        .address {{
+            font-size: 13px;
+            color: #333;
+            font-family: monospace;
+            background: #f5f5f5;
+            padding: 12px 16px;
+            border-radius: 8px;
+            word-break: break-all;
+            margin-bottom: 28px;
+        }}
+        .qr-container {{
+            background: white;
+            padding: 24px;
+            border-radius: 12px;
+            display: inline-block;
+            border: 2px solid #f0f0f0;
+            margin: 8px 0 28px;
+        }}
+        .qr-container img {{
+            display: block;
+            width: 320px;
+            height: 320px;
+            image-rendering: pixelated;
+        }}
+        .instructions {{
+            font-size: 16px;
+            color: #555;
+            line-height: 1.6;
+        }}
+        .warning {{
+            margin-top: 20px;
+            font-size: 13px;
+            color: #e67e22;
+            background: #fef9f0;
+            border: 1px solid #f7931a;
+            border-radius: 8px;
+            padding: 12px 16px;
+        }}
+        .footer {{
+            margin-top: 28px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            font-size: 12px;
+            color: #aaa;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <div class="icon">₿</div>
+            <div class="merchant">Mercury Bitcoin Node</div>
+            <div class="title">On-Chain Deposit</div>
+        </div>
+
+        {amount_html}
+
+        <div class="address-label">Bitcoin Address</div>
+        <div class="address">{address}</div>
+
+        <div class="qr-container">
+            <img src="{slug}.png" alt="Bitcoin Address QR Code">
+        </div>
+
+        <div class="instructions">
+            Scan with any Bitcoin wallet to send on-chain BTC
+        </div>
+        <div class="warning">
+            ⚠ On-chain only — do not send Lightning payments to this address
+        </div>
+
+        <div class="footer">
+            Bitcoin · Native SegWit (P2WPKH) · ~10 min confirmation
+        </div>
+    </div>
+</body>
+</html>"""
+        with open(html_file, "w", encoding="utf-8") as f:
+            f.write(html_content)
+
+        # Reuse shared QR server (same port 8421)
+        server_port = 8421
+        pid_file = "/tmp/mercury_qr_server.pid"
+        if not os.path.exists(pid_file):
+            server_cmd = f"cd {web_dir} && nohup python3 -m http.server {server_port} >/dev/null 2>&1 & echo $! > {pid_file}"
+            subprocess.run(server_cmd, shell=True)
+            time.sleep(0.5)
+
+        try:
+            local_ip = os.getenv("MERCURY_HARDLINE_IP", "")
+            if not local_ip:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+        except Exception:
+            local_ip = "192.168.1.20"
+
+        return f"http://{local_ip}:{server_port}/{slug}.html"
+
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+def cmd_charge(args):
+    """Sovereign POS — create invoice and serve QR URL for customer to scan."""
+    import time
+    sat  = args.sat
+    memo = args.memo or "HVE Payment"
+
+    print(f"\n{W}⚡ HVE Charge{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  Amount : {W}{fmt_sat(sat)}{NC}")
+    print(f"  Memo   : {memo}")
+    print(f"  {DIM}Creating invoice...{NC}")
+
+    data, err = lncli("addinvoice", f"--amt={sat}", f"--memo={memo}", "--expiry=3600", "--private")
+    if err:
+        print(f"  {R}Failed: {err}{NC}\n")
+        return
+
+    pay_req = data.get("payment_request", "")
+    r_hash  = data.get("r_hash", "")
+
+    qr_url = _generate_web_qr(pay_req, sat, memo)
+
+    print(f"\n  {G}✓ Invoice ready{NC}")
+    print(f"\n  {W}Open on any screen — customer scans QR to pay:{NC}")
+    print(f"\n  {C}{qr_url}{NC}\n")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  {DIM}Waiting for payment  (Ctrl+C to cancel){NC}\n")
+
+    for _ in range(720):
+        try:
+            inv_data, inv_err = lncli("lookupinvoice", r_hash)
+            if not inv_err and inv_data:
+                state = inv_data.get("state", "")
+                if state == "SETTLED":
+                    amt_paid = int(inv_data.get("amt_paid_sat", sat))
+                    print(f"  {G}✅  PAID — {fmt_sat(amt_paid)} received{NC}")
+                    print(f"{DIM}{'─' * 55}{NC}\n")
+                    return
+                elif state == "CANCELED":
+                    print(f"  {R}Invoice cancelled{NC}\n")
+                    return
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print(f"\n  {Y}Cancelled — invoice still valid for 1 hour{NC}\n")
+            return
+
+    print(f"  {Y}Timed out — invoice expired{NC}\n")
+
+
+def _generate_web_qr(payment_request, amount, memo):
+    """Generate PNG QR and serve via web - returns URL only."""
+    import subprocess
+    import os
+    import socket
+    import time
+
+    # Create web directory
+    web_dir = "/tmp/mercury_qr"
+    os.makedirs(web_dir, exist_ok=True)
+
+    # Generate PNG QR
+    qr_file = f"{web_dir}/invoice_{amount}sat.png"
+    cmd = ["qrencode", "-s", "10", "-m", "2", "-l", "H", "-o", qr_file, payment_request]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+
+                # Create HTML page
+        html_file = f"{web_dir}/invoice_{amount}sat.html"
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lightning Invoice - {amount:,} SAT</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            background: #1a1a1a;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .invoice {{
+            background: white;
+            border-radius: 16px;
+            padding: 48px;
+            max-width: 600px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            text-align: center;
+        }}
+        .header {{
+            border-bottom: 3px solid #f7931a;
+            padding-bottom: 24px;
+            margin-bottom: 32px;
+        }}
+        .merchant {{
+            font-size: 14px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 8px;
+        }}
+        .title {{
+            font-size: 18px;
+            color: #333;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }}
+        .amount {{
+            font-size: 56px;
+            font-weight: 700;
+            color: #f7931a;
+            margin: 24px 0;
+            line-height: 1;
+        }}
+        .currency {{
+            font-size: 24px;
+            color: #999;
+            font-weight: 400;
+            margin-left: 8px;
+        }}
+        .description-label {{
+            font-size: 12px;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }}
+        .description {{
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 32px;
+            padding: 16px;
+            background: #f9f9f9;
+            border-radius: 8px;
+            font-weight: 500;
+        }}
+        .qr-container {{
+            background: white;
+            padding: 24px;
+            border-radius: 12px;
+            display: inline-block;
+            border: 2px solid #f0f0f0;
+            margin: 24px 0;
+        }}
+        .qr-container img {{
+            display: block;
+            width: 360px;
+            height: 360px;
+            image-rendering: pixelated;
+        }}
+        .instructions {{
+            font-size: 16px;
+            color: #666;
+            margin-top: 24px;
+            line-height: 1.6;
+        }}
+        .footer {{
+            margin-top: 32px;
+            padding-top: 24px;
+            border-top: 1px solid #e0e0e0;
+            font-size: 13px;
+            color: #999;
+        }}
+        .lightning-icon {{
+            color: #f7931a;
+            font-size: 32px;
+            margin-bottom: 12px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="invoice">
+        <div class="header">
+            <div class="lightning-icon">⚡</div>
+            <div class="merchant">Mercury Lightning Node</div>
+            <div class="title">Payment Invoice</div>
+        </div>
+
+        <div class="amount">
+            {amount:,}<span class="currency">SAT</span>
+        </div>
+
+        <div class="description-label">Services / Description</div>
+        <div class="description">
+            {memo}
+        </div>
+
+        <div class="qr-container">
+            <img src="invoice_{amount}sat.png" alt="Lightning Invoice QR Code">
+        </div>
+
+        <div class="instructions">
+            Scan this QR code with your Lightning wallet to pay
+        </div>
+
+        <div class="footer">
+            Bitcoin Lightning Network<br>
+            Instant settlement • Low fees • Secure
+        </div>
+    </div>
+</body>
+</html>"""
+
+        with open(html_file, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        # Start HTTP server on port 8421
+        server_port = 8421
+        pid_file = "/tmp/mercury_qr_server.pid"
+
+        if not os.path.exists(pid_file):
+            server_cmd = f"cd {web_dir} && nohup python3 -m http.server {server_port} >/dev/null 2>&1 & echo $! > {pid_file}"
+            subprocess.run(server_cmd, shell=True)
+            time.sleep(0.5)  # Give server time to start
+
+        # Get local IP
+        try:
+            local_ip = os.getenv("MERCURY_HARDLINE_IP", "")
+            if not local_ip:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+        except:
+            local_ip = "192.168.1.20"
+
+        url = f"http://{local_ip}:{server_port}/invoice_{amount}sat.html"
+        return url
+
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 
 def _agent_get(path):
     """Fetch JSON from mercury-agent, return (data, error)."""
     try:
         req = urllib.request.Request(f"{AGENT_URL}{path}")
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read()), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _agent_post(path, payload):
+    """POST JSON to mercury-agent, return (data, error)."""
+    try:
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{AGENT_URL}{path}", data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read()), None
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read()).get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        return None, detail
     except Exception as e:
         return None, str(e)
 
@@ -502,6 +1419,133 @@ def cmd_magma(args):
             print(f"  {DIM}{data.get('note', '')}{NC}")
             print(f"  {DIM}amboss.space/node/{data.get('pubkey', '')}{NC}")
 
+    elif subcmd == 'auth':
+        # Handle: mercury magma auth setkey <apikey>
+        node_arg = getattr(args, 'node', None)
+        if node_arg:
+            # Treat --node value as API key for `auth setkey` flow
+            api_key_input = node_arg.strip()
+            if not api_key_input.startswith("eyJ"):
+                print(f"\n{R}⚠  That doesn't look like an Amboss JWT (should start with eyJ).{NC}")
+                print(f"  {DIM}Get your API key from: https://amboss.space/settings{NC}")
+                print(f"{DIM}{'─' * 55}{NC}\n")
+                return
+            amboss_env = Path.home() / ".mercury" / "amboss.env"
+            amboss_env.parent.mkdir(parents=True, exist_ok=True)
+            amboss_env.write_text(f"MAGMA_API_KEY={api_key_input}\n")
+            os.chmod(amboss_env, 0o600)
+            print(f"\n{W}Magma — API Key Saved{NC}")
+            print(f"{DIM}{'─' * 55}{NC}")
+            print(f"  {G}✅ API key saved to ~/.mercury/amboss.env{NC}")
+            print(f"  {W}Now run:{NC}")
+            print(f"    {C}mercury magma recommend{NC}   — ranked liquidity offers")
+            print(f"    {C}mercury magma buy{NC}          — purchase inbound channel")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        print(f"\n{W}Magma — Authenticate with Amboss{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        AMBOSS_GQL = "https://api.amboss.space/graphql"
+
+        def _amboss_gql(query, variables=None):
+            payload = {"query": query}
+            if variables:
+                payload["variables"] = variables
+            body = json.dumps(payload).encode()
+            req = urllib.request.Request(
+                AMBOSS_GQL, data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.loads(r.read())
+
+        # Step 1: Get challenge
+        print(f"  {DIM}Fetching challenge from Amboss...{NC}")
+        try:
+            resp = _amboss_gql("{ getSignInfo { identifier message expiry } }")
+            sign_info = resp["data"]["getSignInfo"]
+        except Exception as e:
+            print(f"  {R}Failed to get challenge: {e}{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        identifier = sign_info["identifier"]
+        message    = sign_info["message"]
+        print(f"  {DIM}Challenge: {message}{NC}")
+        print(f"  {DIM}Expires:   {sign_info.get('expiry', '')}{NC}\n")
+
+        # Step 2: Sign with Mercury's node key
+        print(f"  {DIM}Signing with Mercury node key...{NC}")
+        sig_data, sig_err = lncli("signmessage", f"--msg={message}")
+        if sig_err or not sig_data:
+            print(f"  {R}Failed to sign: {sig_err}{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+        signature = sig_data.get("signature", "")
+        if not signature:
+            print(f"  {R}Empty signature returned from lncli.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Step 3: Exchange signature for JWT
+        print(f"  {DIM}Exchanging signature for token...{NC}")
+        login_mutation = """
+        mutation Login($identifier: String!, $seconds: Float!, $signature: String!) {
+          login(identifier: $identifier, seconds: $seconds, signature: $signature)
+        }
+        """
+        try:
+            resp = _amboss_gql(login_mutation, {
+                "identifier": identifier,
+                "seconds":    int(time.time()),
+                "signature":  signature,
+            })
+            if "errors" in resp:
+                raise ValueError(resp["errors"][0]["message"])
+            jwt = resp["data"]["login"]
+        except Exception as e:
+            print(f"  {R}Amboss login failed: {e}{NC}")
+            print(f"  {DIM}Challenge may have expired — re-run: mercury magma auth{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Check if Amboss returned a real JWT (starts with eyJ) or just an identifier
+        if not jwt.startswith("eyJ"):
+            # Node-signature auth creates the account but doesn't yield a bearer token.
+            # User needs to complete one-time web setup to get the API key.
+            node_info, _ = lncli("getinfo")
+            pubkey = node_info.get("identity_pubkey", "") if node_info else ""
+            print(f"  {Y}⚠  Amboss account registered for this node!{NC}")
+            print(f"  {DIM}Node-key auth does not produce an API token — one-time web step needed.{NC}\n")
+            print(f"  {W}One-time setup (5 minutes):{NC}")
+            print(f"    1. Open on any browser:  {C}https://amboss.space/settings{NC}")
+            print(f"    2. Log in via {W}LNURL-auth{NC} (scan QR with your Lightning wallet)")
+            print(f"    3. Go to {W}API Keys{NC} section → generate a key")
+            print(f"    4. Run on Mercury:")
+            print(f"       {C}mercury magma auth --node <paste-api-key-here>{NC}")
+            if pubkey:
+                print(f"\n  {DIM}Mercury node: {pubkey}{NC}")
+                print(f"  {DIM}Amboss page:  https://amboss.space/node/{pubkey}{NC}")
+            print(f"\n  {DIM}After saving the key, run:{NC}")
+            print(f"    {C}mercury magma recommend{NC}   — ranked liquidity offers")
+            print(f"    {C}mercury magma buy{NC}          — purchase inbound channel")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Step 4: Save real JWT
+        amboss_env = Path.home() / ".mercury" / "amboss.env"
+        amboss_env.parent.mkdir(parents=True, exist_ok=True)
+        amboss_env.write_text(f"MAGMA_API_KEY={jwt}\n")
+        os.chmod(amboss_env, 0o600)
+
+        print(f"  {G}✅ Authenticated with Amboss!{NC}")
+        print(f"  {DIM}Token saved to ~/.mercury/amboss.env{NC}")
+        print(f"  {DIM}Token: {jwt[:50]}...{NC}\n")
+        print(f"  {W}Next steps:{NC}")
+        print(f"    {C}mercury magma recommend{NC}   — ranked liquidity offers")
+        print(f"    {C}mercury magma buy{NC}          — purchase inbound channel")
+
     elif subcmd == 'recommend':
         print(f"\n{W}Magma — Best Inbound Liquidity Offers{NC}")
         print(f"{DIM}{'─' * 55}{NC}")
@@ -510,23 +1554,879 @@ def cmd_magma(args):
             print(f"  {R}Agent unavailable: {err}{NC}\n")
             return
         recs = data.get("recommendations", [])
+        node_cap = data.get("node_capacity_sat", 0)
+        if node_cap:
+            print(f"  {DIM}Mercury capacity: {fmt_sat(node_cap)} — showing qualifying offers only{NC}\n")
         if not recs:
-            print(f"  {Y}No recommendations yet.{NC}")
+            print(f"  {Y}No qualifying offers found for Mercury's current capacity.{NC}")
+            print(f"  {DIM}Build more channels to unlock higher-capacity offers (e.g. NexusVault needs 50M SAT){NC}")
         else:
-            print(f"  {DIM}Sorted by lowest fee rate (best value first){NC}\n")
+            print(f"  {DIM}Sorted by lowest total fee (best value first){NC}\n")
             for r in recs:
-                alias   = r.get("node_alias", "unknown")
-                size    = int(r.get("size_sat", 0))
-                ppm     = r.get("fee_variable_ppm", 0)
-                fix_sat = int(r.get("fee_fixed_sat", 0))
-                print(f"  {G}→{NC} {W}{alias}{NC}")
-                print(f"     {fmt_sat(size)}  |  {ppm} ppm  base {fix_sat} sat")
+                alias    = r.get("node_alias", "unknown")
+                size     = int(r.get("size_sat", 0))
+                ppm      = r.get("fee_rate_ppm", r.get("fee_variable_ppm", 0))
+                fix_sat  = int(r.get("fee_fixed_sat", 0))
+                tot_fee  = int(r.get("total_fee_sat", fix_sat + ppm))
+                offer_id = r.get("offer_id", "")
+                print(f"  {G}→{NC} {W}{alias}{NC}  {DIM}({offer_id[:8]}...){NC}")
+                print(f"     {fmt_sat(size)}  |  {ppm} ppm  base {fix_sat} sat  |  total fee: {tot_fee} sat")
         print(f"\n  {Y}⚠  READ-ONLY — human approval required before opening channels{NC}")
+
+    elif subcmd == 'buy':
+        node_arg = getattr(args, 'node', None)
+        print(f"\n{W}Magma — Buy Inbound Liquidity{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+
+        # Check for API key in env or ~/.mercury/amboss.env
+        api_key = os.getenv("MAGMA_API_KEY", "")
+        amboss_env = Path.home() / ".mercury" / "amboss.env"
+        if not api_key and amboss_env.exists():
+            for line in amboss_env.read_text().splitlines():
+                if line.startswith("MAGMA_API_KEY="):
+                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+
+        if not api_key:
+            print(f"  {Y}⚠  Amboss authentication required.{NC}\n")
+            print(f"  {W}One-time setup (30 seconds):{NC}")
+            print(f"    {C}mercury magma auth{NC}")
+            print(f"    Mercury will sign a challenge with its own node key — no browser needed.")
+            print(f"\n  Then run: {W}mercury magma buy{NC} [--node <alias>]")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Fetch recommendations (capacity-filtered)
+        data, err = _agent_get("/api/magma/recommend")
+        if err:
+            print(f"  {R}Agent unavailable: {err}{NC}\n")
+            return
+
+        recs = data.get("recommendations", [])
+        if not recs:
+            print(f"  {Y}No offers available right now.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Pick target offer
+        target = None
+        if node_arg:
+            for r in recs:
+                alias = r.get("node_alias", "")
+                if node_arg.lower() in alias.lower():
+                    target = r
+                    break
+            if not target:
+                print(f"  {R}No offer found matching '{node_arg}'.{NC}")
+                print(f"  Run {W}mercury magma recommend{NC} to see available nodes.")
+                print(f"{DIM}{'─' * 55}{NC}\n")
+                return
+        else:
+            target = recs[0]
+
+        alias    = target.get("node_alias", "unknown")
+        size     = int(target.get("size_sat", 0))
+        fee_fix  = int(target.get("fee_fixed_sat", 0))
+        ppm      = int(target.get("fee_rate_ppm", target.get("fee_variable_ppm", 0)))
+        offer_id = target.get("offer_id", target.get("id", ""))
+        fee_var  = round(size * ppm / 1_000_000)
+        total_fee = fee_fix + fee_var
+        print(f"  {W}Offer selected:{NC}  {alias}")
+        print(f"  Channel size: {W}{fmt_sat(size)}{NC}")
+        print(f"  Fee:          {Y}{fmt_sat(total_fee)}{NC}  ({fee_fix} base + {fee_var} variable)")
+        print(f"  Offer ID:     {DIM}{offer_id}{NC}\n")
+        print(f"  {Y}⚠  This will spend {fmt_sat(total_fee)} from your wallet.{NC}")
+
+        # Confirm
+        try:
+            confirm = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {DIM}Cancelled.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        if confirm != "yes":
+            print(f"  {DIM}Aborted.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Execute buy via agent
+        print(f"\n  {DIM}Submitting buy request to Amboss Magma...{NC}")
+        buy_result, buy_err = _agent_post("/api/magma/buy", {
+            "offer_id": offer_id,
+            "size_sat": size,
+            "api_key": api_key,
+        })
+        if buy_err:
+            print(f"  {R}Buy failed: {buy_err}{NC}")
+            print(f"  {DIM}Check that your API key is valid and retry.{NC}")
+        else:
+            invoice    = buy_result.get("invoice", "")
+            status     = buy_result.get("status", "submitted")
+            order_id   = buy_result.get("purchase_id", "")
+            note       = buy_result.get("note", "")
+            status_str = {
+                "WAITING_FOR_SELLER_APPROVAL": f"{Y}Waiting for seller approval{NC}",
+                "WAITING_FOR_CHANNEL_OPEN":    f"{Y}Waiting for channel open{NC}",
+                "PAYMENT_PENDING":             f"{Y}Invoice ready — payment pending{NC}",
+                "CHANNEL_OPEN":                f"{G}Channel open!{NC}",
+                "COMPLETED":                   f"{G}Completed!{NC}",
+            }.get(status, f"{G}{status}{NC}")
+            print(f"  {G}✅ Order placed!{NC}")
+            print(f"  Status:   {status_str}")
+            if order_id:
+                print(f"  Order ID: {DIM}{order_id}{NC}")
+            if note:
+                print(f"\n  {DIM}{note}{NC}")
+            if invoice:
+                print(f"\n  {W}Fee invoice to pay:{NC}")
+                print(f"  {DIM}{invoice[:80]}...{NC}")
+                print(f"\n  Pay this from your wallet to complete the channel open.")
+                print(f"  Or: mercury pay {invoice}")
+            elif status == "WAITING_FOR_SELLER_APPROVAL":
+                print(f"\n  {DIM}The seller will approve and generate a fee invoice.{NC}")
+                print(f"  {DIM}Run `mercury channels` to monitor — inbound will appear when approved.{NC}")
+
+    elif subcmd == 'status':
+        print(f"\n{W}Magma — Inbound Liquidity Orders{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        data, err = _agent_get("/api/magma/orders")
+        if err:
+            print(f"  {R}Agent unavailable: {err}{NC}\n")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+        orders = data.get("orders", [])
+        if not orders:
+            print(f"  {DIM}No Magma orders found.{NC}")
+            print(f"  {DIM}Run `magma buy <alias> <amount>` to purchase inbound liquidity.{NC}")
+        else:
+            STATUS_ICON = {
+                "WAITING_FOR_SELLER_APPROVAL": f"{Y}⏳ Waiting seller approval{NC}",
+                "WAITING_FOR_CHANNEL_OPEN":    f"{Y}⏳ Waiting channel open{NC}",
+                "PAYMENT_PENDING":             f"{Y}💳 Invoice ready — pay to complete{NC}",
+                "CHANNEL_OPEN":                f"{G}⚡ Channel open{NC}",
+                "COMPLETED":                   f"{G}✅ Completed{NC}",
+                "CANCELLED":                   f"{R}✗ Cancelled{NC}",
+                "EXPIRED":                     f"{R}✗ Expired{NC}",
+            }
+            for o in orders:
+                status_raw  = o.get("status", "unknown")
+                status_disp = STATUS_ICON.get(status_raw, f"{DIM}{status_raw}{NC}")
+                size_sat    = int(o.get("size_sat", 0))
+                seller      = o.get("seller") or "unknown seller"
+                order_id    = o.get("order_id", "")[:8]
+                created_raw = o.get("created_at", "")
+                try:
+                    from datetime import datetime, timezone
+                    dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                    created = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    created = created_raw[:16] if created_raw else "unknown"
+                print(f"  {W}{fmt_sat(size_sat)}{NC}  from {W}{seller}{NC}")
+                print(f"    {status_disp}")
+                print(f"    {DIM}Order: {order_id}...  |  {created}{NC}")
+
     else:
         print(f"{R}Unknown magma subcommand: {subcmd}{NC}")
-        print(f"  Use: mercury magma [offers|score|recommend]")
+        print(f"  Use: mercury magma [offers|score|recommend|buy|status|auth]")
 
     print(f"{DIM}{'─' * 55}{NC}\n")
+
+
+def cmd_channel(args):
+    """Open or close a Lightning channel."""
+    subcmd = getattr(args, 'channel_action', None)
+
+    if subcmd == "open":
+        peer_uri = getattr(args, 'peer', None)
+        amount   = getattr(args, 'amount', None)
+
+        print(f"\n{W}Open Lightning Channel{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+
+        if not peer_uri:
+            print(f"  {R}Usage: channel open <node> <amount>{NC}")
+            print(f"  {DIM}Example: channel open acinq 500000{NC}")
+            print(f"  {DIM}Run `nodes` to see available nodes.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+        if not amount:
+            print(f"  {R}Usage: channel open <node> <amount>{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        try:
+            sat = int(str(amount).replace("_","").replace(",",""))
+        except ValueError:
+            print(f"  {R}Invalid amount: {amount}{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        if sat < 20000:
+            print(f"  {R}Minimum channel size is 20,000 SAT.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Resolve alias → URI
+        resolved_uri, display_name = resolve_node(peer_uri)
+        if not resolved_uri:
+            print(f"  {R}{display_name}{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Warn if below known minimum
+        node_info = next((v for v in NODE_DIRECTORY.values() if v["uri"] == resolved_uri), None)
+        if node_info and sat < node_info["min_sat"]:
+            print(f"  {Y}⚠  {display_name} requires a minimum of {fmt_sat(node_info['min_sat'])}.{NC}")
+            print(f"  {Y}   You requested {fmt_sat(sat)} — this will likely be rejected.{NC}\n")
+
+        # Parse pubkey from URI
+        pubkey = resolved_uri.split("@")[0]
+
+        # Check on-chain balance
+        wallet, werr = lncli("walletbalance")
+        onchain = int((wallet or {}).get("confirmed_balance", 0))
+        reserved = int((wallet or {}).get("reserved_balance_anchor_chan", 0))
+        usable = onchain - reserved
+        if sat > usable:
+            print(f"  {R}Insufficient on-chain balance.{NC}")
+            print(f"  Requested: {fmt_sat(sat)}  |  Usable: {fmt_sat(usable)}  |  Reserved: {fmt_sat(reserved)}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        print(f"  Peer:   {W}{display_name}{NC}")
+        print(f"  Amount: {W}{fmt_sat(sat)}{NC}")
+        print(f"  On-chain balance after open: ~{fmt_sat(usable - sat)}")
+        print(f"\n  {Y}⚠  This will open an on-chain channel (requires ~3 block confirmations).{NC}")
+
+        try:
+            confirm = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {DIM}Cancelled.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+        if confirm != "yes":
+            print(f"  {DIM}Aborted.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Connect to peer first
+        print(f"\n  {DIM}Connecting to peer...{NC}")
+        conn_result, conn_err = lncli("connect", resolved_uri)
+        if conn_err and "already connected" not in str(conn_err).lower():
+            print(f"  {Y}Connect note: {conn_err}{NC}")
+
+        # Open channel
+        print(f"  {DIM}Opening channel...{NC}")
+        result, err = lncli("openchannel",
+                            f"--node_key={pubkey}",
+                            f"--local_amt={sat}",
+                            "--min_confs=1")
+        if err:
+            print(f"  {R}Failed: {err}{NC}")
+        else:
+            txid = (result or {}).get("funding_txid", "?")
+            print(f"  {G}✅ Channel opening broadcast!{NC}")
+            print(f"  Funding txid: {W}{txid}{NC}")
+            print(f"  {DIM}Track: https://mempool.space/tx/{txid}{NC}")
+            print(f"  {DIM}Run `channels` in ~30 min to see it appear as active.{NC}")
+
+    elif subcmd == "close":
+        target = getattr(args, 'target', None)
+
+        print(f"\n{W}Close Lightning Channel{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+
+        if not target:
+            print(f"  {R}Usage: channel close <alias or channel_point>{NC}")
+            print(f"  {DIM}Example: channel close gameb_1{NC}")
+            print(f"  {DIM}Run `mercury channels` to see aliases.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        # Find the channel by alias
+        channels_data, err = lncli("listchannels")
+        if err or not channels_data:
+            print(f"  {R}Could not fetch channels: {err}{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        match = None
+        for ch in channels_data.get("channels", []):
+            peer = ch.get("remote_pubkey", "")
+            alias_info, _ = lncli("getnodeinfo", f"--pub_key={peer}")
+            alias = (alias_info or {}).get("node", {}).get("alias", "")
+            if (target.lower() in alias.lower() or
+                    target.lower() in peer.lower() or
+                    target == ch.get("channel_point", "")):
+                match = ch
+                match["_alias"] = alias or peer[:20]
+                break
+
+        if not match:
+            print(f"  {R}No channel found matching: {target}{NC}")
+            print(f"  {DIM}Run `mercury channels` to see channel aliases.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        alias     = match["_alias"]
+        chan_point = match["channel_point"]
+        local     = int(match["local_balance"])
+        remote    = int(match["remote_balance"])
+        capacity  = int(match["capacity"])
+
+        print(f"  Channel: {W}{alias}{NC}  ({chan_point})")
+        print(f"  Local:   {fmt_sat(local)}  |  Remote: {fmt_sat(remote)}  |  Cap: {fmt_sat(capacity)}")
+        print(f"\n  {Y}⚠  Cooperative close — your local balance ({fmt_sat(local)}) returns on-chain.{NC}")
+        print(f"  {Y}⚠  This requires the peer to be online and cooperative.{NC}")
+
+        try:
+            confirm = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {DIM}Cancelled.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+        if confirm != "yes":
+            print(f"  {DIM}Aborted.{NC}")
+            print(f"{DIM}{'─' * 55}{NC}\n")
+            return
+
+        txid_hash, vout = chan_point.rsplit(":", 1)
+        result, err = lncli("closechannel",
+                            f"--chan_point={chan_point}")
+        if err:
+            print(f"  {R}Close failed: {err}{NC}")
+            print(f"  {DIM}If the peer is offline, a force close may be needed (contact CTO).{NC}")
+        else:
+            close_txid = (result or {}).get("closing_txid", "?")
+            print(f"  {G}✅ Close broadcast!{NC}")
+            print(f"  Closing txid: {W}{close_txid}{NC}")
+            print(f"  {DIM}Funds will return on-chain after ~1 block confirmation.{NC}")
+
+    else:
+        print(f"\n{W}Channel Management{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        print(f"  {W}channel open{NC}  <pubkey@host:port> <sat>  — open a new channel")
+        print(f"  {W}channel close{NC} <alias>                   — cooperative close")
+        print(f"\n  {DIM}Well-connected routing nodes to consider:{NC}")
+        print(f"  {DIM}ACINQ:        03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f@3.33.236.230:9735{NC}")
+        print(f"  {DIM}Boltz:        026165850492521f4ac8abd9bd8088123446d126f648ca35e60f88177dc149ceb2@boltz.exchange:9735{NC}")
+        print(f"  {DIM}WoS:          035e4ff418fc8b5554c5d9eea66396c227bd429a3251c8cbc711002ba215bfc226@170.75.163.209:9735{NC}")
+        print(f"{DIM}{'─' * 55}{NC}\n")
+        return
+
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+
+def cmd_nodes(args):
+    """List the node directory — known routing nodes you can open channels with."""
+    print(f"\n{W}Node Directory{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  {'Alias':<22} {'Min Chan':>12}  Note")
+    print(f"  {DIM}{'─'*22} {'─'*12}  {'─'*28}{NC}")
+    for key, info in NODE_DIRECTORY.items():
+        min_str = fmt_sat(info["min_sat"])
+        print(f"  {W}{info['alias']:<22}{NC} {DIM}{min_str:>12}{NC}  {DIM}{info['note']}{NC}")
+        print(f"  {DIM}  → channel open {key} <amount>{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  {DIM}Raw pubkey@host:port also accepted for unlisted nodes.{NC}\n")
+
+
+def cmd_transactions(args):
+    """Show recent on-chain Bitcoin transactions with mempool links."""
+    import datetime
+
+    limit = getattr(args, 'limit', None) or 10
+    show_all = getattr(args, 'all', False)
+
+    txns_data, err = lncli("listchaintxns")
+    if err or not txns_data:
+        print(f"  {R}Could not fetch transactions: {err}{NC}\n")
+        return
+
+    txns = txns_data.get("transactions", [])
+    if not txns:
+        print(f"  {Y}No on-chain transactions found.{NC}\n")
+        return
+
+    # Sort newest first
+    txns = sorted(txns, key=lambda x: int(x.get("time_stamp", 0)), reverse=True)
+    display = txns if show_all else txns[:limit]
+
+    print(f"\n{W}On-Chain Transactions{NC}  {DIM}({len(txns)} total){NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
+    for tx in display:
+        amount    = int(tx.get("amount", 0))
+        confs     = int(tx.get("num_confirmations", 0))
+        ts        = int(tx.get("time_stamp", 0))
+        tx_hash   = tx.get("tx_hash", "")
+        fees      = int(tx.get("total_fees", 0))
+
+        # Date
+        try:
+            dt = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            dt = "unknown"
+
+        # Direction + colour
+        if amount > 0:
+            amt_str = f"{G}+{fmt_sat(amount)}{NC}"
+            direction = "▲ IN "
+        else:
+            amt_str = f"{R}{fmt_sat(amount)}{NC}"
+            direction = "▼ OUT"
+
+        # Confirmation status
+        if confs == 0:
+            conf_str = f"{Y}pending{NC}"
+        elif confs < 3:
+            conf_str = f"{Y}{confs} conf{'s' if confs > 1 else ''}{NC}"
+        else:
+            conf_str = f"{DIM}{confs} confs{NC}"
+
+        print(f"  {direction}  {amt_str:<28}  {conf_str:<16}  {DIM}{dt}{NC}")
+        if fees > 0 and amount < 0:
+            print(f"         {DIM}fee: {fmt_sat(fees)}{NC}")
+        print(f"         {C}https://mempool.space/tx/{tx_hash}{NC}")
+
+    if not show_all and len(txns) > limit:
+        print(f"\n  {DIM}Showing {limit} of {len(txns)}. Run `transactions --all` to see all.{NC}")
+
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+    if getattr(args, 'ai', False):
+        total_in  = sum(int(t.get("amount", 0)) for t in txns if int(t.get("amount", 0)) > 0)
+        total_out = sum(abs(int(t.get("amount", 0))) for t in txns if int(t.get("amount", 0)) < 0)
+        total_fees_paid = sum(int(t.get("total_fees", 0)) for t in txns if int(t.get("amount", 0)) < 0)
+        ctx = (f"On-chain transaction history ({len(txns)} total):\n"
+               f"Total received: {total_in} SAT\n"
+               f"Total sent: {total_out} SAT\n"
+               f"Total fees paid: {total_fees_paid} SAT\n")
+        for t in txns[:5]:
+            amt  = int(t.get("amount", 0))
+            confs = int(t.get("num_confirmations", 0))
+            ctx += f"  {'IN' if amt > 0 else 'OUT'}: {abs(amt)} SAT, {confs} confirmations\n"
+        _ai_insight(ctx, "transactions")
+
+
+def cmd_fees(args):
+    """Show channel fee policy and earnings. Optionally update fees."""
+    subcmd = getattr(args, 'fees_action', None)
+
+    # ── fees set <ppm> [base_msat] ────────────────────────────────────────────
+    if subcmd == "set":
+        ppm      = getattr(args, 'ppm', None)
+        base_msat = getattr(args, 'base_msat', 1000)
+        chan_alias = getattr(args, 'channel', None)
+
+        if ppm is None:
+            print(f"\n  {R}Usage: fees set <ppm> [base_msat]{NC}")
+            print(f"  {DIM}Example: fees set 100          (100 ppm, 1 sat base — all channels){NC}")
+            print(f"  {DIM}Example: fees set 50 500       (50 ppm, 0.5 sat base){NC}\n")
+            return
+
+        print(f"\n{W}Update Channel Fees{NC}")
+        print(f"{DIM}{'─' * 55}{NC}")
+        print(f"  Base fee:  {W}{base_msat} msat{NC}  ({base_msat/1000:.3f} SAT per payment)")
+        print(f"  Rate:      {W}{ppm} ppm{NC}  ({ppm/10000:.4f}% per routed SAT)")
+        print(f"  Scope:     {W}{'all channels' if not chan_alias else chan_alias}{NC}")
+        print(f"\n  {Y}⚠  This updates your public routing policy on the Lightning Network.{NC}")
+
+        try:
+            confirm = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {DIM}Cancelled.{NC}\n")
+            return
+        if confirm != "yes":
+            print(f"  {DIM}Aborted.{NC}\n")
+            return
+
+        result, err = lncli("updatechanpolicy",
+                            f"--base_fee_msat={base_msat}",
+                            f"--fee_rate_ppm={ppm}",
+                            "--time_lock_delta=40")
+        if err:
+            print(f"  {R}Failed: {err}{NC}")
+        else:
+            print(f"  {G}✅ Fee policy updated and broadcast to the network.{NC}")
+            failed = (result or {}).get("failed_updates", [])
+            if failed:
+                print(f"  {Y}  {len(failed)} channel(s) failed to update.{NC}")
+        print(f"{DIM}{'─' * 55}{NC}\n")
+        return
+
+    # ── fees (report) ─────────────────────────────────────────────────────────
+    report, err = lncli("feereport")
+    if err or not report:
+        print(f"  {R}Could not fetch fee report: {err}{NC}\n")
+        return
+
+    # Build alias map from channels
+    ch_data, _ = lncli("listchannels")
+    alias_map = {}   # channel_point → peer alias
+    if ch_data:
+        for ch in ch_data.get("channels", []):
+            cp = ch.get("channel_point", "")
+            alias_map[cp] = ch.get("peer_alias") or ch.get("remote_pubkey", "?")[:16] + "..."
+
+    day_sat   = int(report.get("day_fee_sum",   0))
+    week_sat  = int(report.get("week_fee_sum",  0))
+    month_sat = int(report.get("month_fee_sum", 0))
+
+    print(f"\n{W}Channel Fees{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
+    # Earnings summary
+    print(f"  {W}Earnings{NC}")
+    print(f"    Today:   {G if day_sat > 0 else DIM}{fmt_sat(day_sat)}{NC}")
+    print(f"    Week:    {G if week_sat > 0 else DIM}{fmt_sat(week_sat)}{NC}")
+    print(f"    Month:   {G if month_sat > 0 else DIM}{fmt_sat(month_sat)}{NC}")
+
+    if day_sat == 0 and week_sat == 0 and month_sat == 0:
+        print(f"\n  {Y}No routing fees earned yet — set a competitive rate to attract payments.{NC}")
+        print(f"  {DIM}Tip: fees set 100   (100 ppm ≈ 0.01% — good starting point){NC}")
+
+    # Per-channel policy
+    channel_fees = report.get("channel_fees", [])
+    if channel_fees:
+        print(f"\n  {W}Policy per channel{NC}")
+        print(f"  {DIM}{'Channel':<22} {'Base':>10}  {'Rate':>8}  {'ppm':>6}{NC}")
+        print(f"  {DIM}{'─'*22} {'─'*10}  {'─'*8}  {'─'*6}{NC}")
+        for cf in channel_fees:
+            cp        = cf.get("channel_point", "")
+            alias     = alias_map.get(cp, cp[:20] + "...")
+            base_msat = int(cf.get("base_fee_msat", 0))
+            ppm       = int(cf.get("fee_per_mil", 0))
+            base_sat  = f"{base_msat/1000:.0f} msat"
+            rate_pct  = f"{ppm/10000:.4f}%"
+            print(f"  {W}{alias:<22}{NC} {DIM}{base_sat:>10}  {rate_pct:>8}  {ppm:>6}{NC}")
+
+    print(f"\n  {DIM}To update: fees set <ppm>   e.g. fees set 100{NC}")
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+    if getattr(args, 'ai', False):
+        ctx = (f"Routing fee earnings: today {day_sat} SAT, week {week_sat} SAT, month {month_sat} SAT\n")
+        for cf in channel_fees:
+            cp    = cf.get("channel_point", "")
+            alias = alias_map.get(cp, "?")
+            base  = int(cf.get("base_fee_msat", 0))
+            ppm   = int(cf.get("fee_per_mil", 0))
+            ctx  += f"Channel {alias}: base {base} msat, {ppm} ppm rate\n"
+        _ai_insight(ctx, "fees")
+
+
+def cmd_payments(args):
+    """Show Lightning payment history — sent and received."""
+    limit = getattr(args, 'limit', 20) or 20
+
+    print(f"\n{W}Lightning Payments{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
+    data, err = _agent_get(f"/api/payments?limit={limit}")
+    if err:
+        print(f"  {R}Agent unavailable: {err}{NC}\n")
+        print(f"{DIM}{'─' * 55}{NC}\n")
+        return
+
+    payments = data.get("payments", [])
+
+    if not payments:
+        print(f"  {DIM}No Lightning payments yet.{NC}")
+        print(f"  {DIM}Send a payment: pay <bolt11>{NC}")
+        print(f"  {DIM}Receive:        invoice <amount> <memo>{NC}")
+    else:
+        total_sent = sum(p["amount_sat"] for p in payments if p["direction"] == "sent")
+        total_recv = sum(p["amount_sat"] for p in payments if p["direction"] == "received")
+        total_fees = sum(p["fee_sat"]    for p in payments if p["direction"] == "sent")
+        print(f"  {G}▲ Received: {fmt_sat(total_recv)}{NC}   "
+              f"{R}▼ Sent: {fmt_sat(total_sent)}{NC}   "
+              f"{DIM}Fees: {fmt_sat(total_fees)}{NC}\n")
+
+        for p in payments:
+            ts  = p.get("timestamp", 0)
+            amt = int(p.get("amount_sat", 0))
+            fee = int(p.get("fee_sat", 0))
+            memo = p.get("memo", "") or ""
+            memo_str = f"  {DIM}{memo[:35]}{NC}" if memo else ""
+            try:
+                dt = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+            except Exception:
+                dt = "?"
+            if p["direction"] == "received":
+                print(f"  {G}▲ IN{NC}  {W}{fmt_sat(amt):>14}{NC}  {DIM}{dt}{NC}{memo_str}")
+            else:
+                fee_str = f"  {DIM}fee {fmt_sat(fee)}{NC}" if fee else ""
+                print(f"  {R}▼ OUT{NC} {W}{fmt_sat(amt):>14}{NC}  {DIM}{dt}{NC}{fee_str}{memo_str}")
+
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+    if getattr(args, 'ai', False):
+        if not payments:
+            ctx = "No Lightning payments have been sent or received yet. Node is freshly set up."
+        else:
+            total_sent = sum(p["amount_sat"] for p in payments if p["direction"] == "sent")
+            total_recv = sum(p["amount_sat"] for p in payments if p["direction"] == "received")
+            total_fees = sum(p["fee_sat"]    for p in payments if p["direction"] == "sent")
+            ctx = (f"Lightning payment history ({len(payments)} total):\n"
+                   f"Total received: {total_recv} SAT\n"
+                   f"Total sent: {total_sent} SAT\n"
+                   f"Total routing fees paid: {total_fees} SAT\n")
+            for p in payments[:5]:
+                ctx += f"  {p['direction'].upper()}: {p['amount_sat']} SAT, memo: {p.get('memo','')}\n"
+        _ai_insight(ctx, "payments")
+
+
+def cmd_routing(args):
+    """Show forwarding history — payments routed for other nodes + fees earned."""
+    days = getattr(args, 'days', 30) or 30
+
+    print(f"\n{W}Routing History  ({days}d){NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
+    data, err = _agent_get(f"/api/routing?days={days}&limit=50")
+    if err:
+        print(f"  {R}Agent unavailable: {err}{NC}\n")
+        print(f"{DIM}{'─' * 55}{NC}\n")
+        return
+
+    events     = data.get("events", [])
+    total_fees = data.get("total_fees_sat", 0)
+    total      = data.get("total", 0)
+
+    if not events:
+        print(f"  {DIM}No routing events in the last {days} days.{NC}")
+        print(f"\n  {Y}Tip:{NC} To start earning routing fees:")
+        print(f"  {DIM}1. Set a fee: fees set 100{NC}")
+        print(f"  {DIM}2. Ensure you have both inbound and outbound liquidity{NC}")
+        print(f"  {DIM}3. Channels must be well-connected (ACINQ, WoS, etc.){NC}")
+    else:
+        print(f"  {G}⚡ {fmt_sat(int(total_fees))} earned routing fees{NC}  "
+              f"{DIM}({total} events, {days}d){NC}\n")
+        for e in events[:20]:
+            ts       = e.get("timestamp", 0)
+            amt      = int(e.get("amt_out_sat", 0))
+            fee_sat  = e.get("fee_sat", 0)
+            chan_in  = e.get("chan_in", "?")
+            chan_out = e.get("chan_out", "?")
+            try:
+                dt = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+            except Exception:
+                dt = "?"
+            fee_str = f"{fee_sat:.3f}" if isinstance(fee_sat, float) else str(fee_sat)
+            print(f"  {DIM}{dt}{NC}  {W}{fmt_sat(amt)}{NC} routed  "
+                  f"{G}+{fee_str} SAT{NC}  {DIM}{chan_in} → {chan_out}{NC}")
+        if total > 20:
+            print(f"\n  {DIM}... and {total - 20} more events{NC}")
+
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+    if getattr(args, 'ai', False):
+        if not events:
+            ctx = f"No routing events in the last {days} days. Node has 0 routing fee income."
+        else:
+            ctx = (f"Routing history ({days} days): {total} forwarding events, "
+                   f"{total_fees} SAT total fees earned.\n")
+            for e in events[:5]:
+                ctx += (f"  Routed {e.get('amt_out_sat')} SAT, earned {e.get('fee_sat')} SAT "
+                        f"({e.get('chan_in','?')} → {e.get('chan_out','?')})\n")
+        _ai_insight(ctx, "routing")
+
+
+def cmd_rebalance(args):
+    """Circular channel rebalance — push local balance from full channel to empty channels."""
+    amount = getattr(args, 'amount', None)
+    dry_run = getattr(args, 'dry_run', False)
+
+    print(f"\n{W}Channel Rebalance{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
+    # Fetch channels
+    channels_data, err = lncli("listchannels")
+    if err or not channels_data:
+        print(f"  {R}Could not fetch channels: {err}{NC}\n")
+        return
+
+    channels = channels_data.get("channels", [])
+    if not channels:
+        print(f"  {Y}No active channels.{NC}\n")
+        return
+
+    # Classify channels; also build a map of pubkey→scid for last_hop selection
+    sources  = []   # high local % — need to push out
+    sinks    = []   # low local % — good to receive into
+    all_chs  = []
+
+    for ch in channels:
+        cap      = int(ch.get("capacity", 0))
+        local    = int(ch.get("local_balance", 0))
+        remote   = int(ch.get("remote_balance", 0))
+        scid     = ch.get("scid", "")
+        lifetime = int(ch.get("lifetime", 0))   # seconds channel has been open
+        pct      = round(local / cap * 100, 1) if cap else 0
+        reserve  = int(ch.get("local_chan_reserve_sat", 0))
+        spendable = max(0, local - reserve - 1000)
+        entry = {
+            "scid":       scid,
+            "scid_str":   ch.get("scid_str", str(scid)),
+            "pubkey":     ch.get("remote_pubkey", ""),
+            "alias":      ch.get("peer_alias", ""),
+            "local":      local,
+            "remote":     remote,
+            "cap":        cap,
+            "pct":        pct,
+            "spendable":  spendable,
+            "active":     ch.get("active", False),
+            "lifetime":   lifetime,
+        }
+        all_chs.append(entry)
+        if pct >= 60:
+            sources.append(entry)
+        elif pct <= 20:
+            sinks.append(entry)
+
+    # Display current state
+    print(f"  {'Peer':<16} {'Local':>10} {'Remote':>10} {'Cap':>10}  {'%':>5}  {'Age':>6}")
+    print(f"  {DIM}{'─' * 65}{NC}")
+    for e in all_chs:
+        age_h   = e["lifetime"] // 3600
+        pct     = e["pct"]
+        color   = G if 40 <= pct <= 70 else (Y if pct > 70 else R)
+        alias   = (e["alias"] or e["scid_str"])[:16]
+        new_tag = f" {Y}(new){NC}" if e["lifetime"] < 1800 else ""
+        print(f"  {DIM}{alias:<16}{NC} {fmt_sat(e['local']):>10} {fmt_sat(e['remote']):>10} "
+              f"{fmt_sat(e['cap']):>10}  {color}{pct:>4}%{NC}  {DIM}{age_h:>4}h{NC}{new_tag}")
+
+    print(f"\n  {DIM}Source channels (>60% local):{NC} {len(sources)}")
+    print(f"  {DIM}Sink channels   (<20% local):{NC} {len(sinks)}\n")
+
+    if not sources:
+        print(f"  {G}✅ Channels are already balanced — no rebalance needed.{NC}\n")
+        return
+    if not sinks:
+        print(f"  {Y}No suitable sink channels (all channels have >20% local).{NC}\n")
+        return
+
+    # Pick best source (highest local %) and best sink (most inbound = most remote)
+    source = max(sources, key=lambda x: x["pct"])
+    sink   = max(sinks,   key=lambda x: x["remote"])
+
+    # Warn if source channel is brand new — gossip may not have propagated
+    if source["lifetime"] < 1800:
+        age_min = source["lifetime"] // 60
+        print(f"  {Y}⚠ Source channel is only {age_min} min old.{NC}")
+        print(f"  {DIM}  Channel gossip typically takes 15–30 min to propagate.{NC}")
+        print(f"  {DIM}  Rebalance may fail — try again in {30 - age_min} min if it does.{NC}\n")
+
+    max_rebalance = source["spendable"]
+
+    if amount is None:
+        # Target 50% balance on source channel
+        target_local = int(source["cap"] * 0.50)
+        amount = max(0, source["local"] - target_local)
+        amount = min(amount, max_rebalance)
+        # Cap at 200K SAT per attempt for reliability
+        amount = min(amount, 200_000)
+
+    amount = min(amount, max_rebalance)
+
+    if amount < 5_000:
+        print(f"  {Y}Rebalance amount too small ({amount} sat) — nothing to do.{NC}\n")
+        return
+
+    print(f"  {W}Plan:{NC}")
+    print(f"    Source:  {W}{source['alias'] or source['scid_str']}{NC}  ({source['pct']}% local → target ~50%)")
+    print(f"    Return:  {W}{sink['alias'] or sink['scid_str']}{NC}  ({sink['pct']}% local, {fmt_sat(sink['remote'])} inbound)")
+    print(f"    Amount:  {W}{fmt_sat(amount)}{NC}")
+    print(f"    Method:  circular self-payment  |  up to 5 parts  |  last_hop: {sink['alias'] or sink['pubkey'][:16]}\n")
+
+    if dry_run:
+        print(f"  {DIM}Dry run — no payment sent.{NC}\n")
+        return
+
+    try:
+        confirm = input(f"  Type {W}yes{NC} to execute rebalance: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  {DIM}Cancelled.{NC}\n")
+        return
+
+    if confirm != "yes":
+        print(f"  {DIM}Aborted.{NC}\n")
+        return
+
+    # Progressive retry: try full amount, then halves, down to 50K minimum
+    attempts = []
+    a = amount
+    while a >= 50_000:
+        attempts.append(a)
+        a = a // 2
+    if not attempts:
+        attempts = [amount]
+
+    for attempt_amt in attempts:
+        print(f"\n  {DIM}Attempt: {fmt_sat(attempt_amt)} sat...{NC}")
+
+        # Create fresh self-invoice for this attempt
+        inv_data, inv_err = lncli("addinvoice", f"--amt={attempt_amt}", "--expiry=300",
+                                  "--memo=mercury-rebalance")
+        if inv_err or not inv_data:
+            print(f"  {R}Failed to create invoice: {inv_err}{NC}\n")
+            return
+
+        bolt11 = inv_data.get("payment_request", "")
+        if not bolt11:
+            print(f"  {R}No payment_request in invoice response.{NC}\n")
+            return
+
+        # Pay with outgoing channel forced + last_hop hint + MPP allowed
+        pay_data, pay_err = lncli(
+            "payinvoice", "--force", "--allow_self_payment",
+            "--max_parts=5",
+            f"--fee_limit_sat={max(50, attempt_amt // 200)}",  # max 0.5% fee
+            bolt11,
+            f"--outgoing_chan_id={source['scid']}",
+            f"--last_hop_pubkey={sink['pubkey']}",
+            timeout=120,
+        )
+
+        if pay_err:
+            print(f"  {Y}↳ No path found for {fmt_sat(attempt_amt)} — trying smaller...{NC}")
+            continue
+
+        # Success
+        fee_sat = 0
+        if pay_data:
+            fee_sat = int(pay_data.get("fee_sat", pay_data.get("fee", 0)))
+
+        print(f"\n  {G}✅ Rebalance complete!{NC}")
+        print(f"     Moved:   {W}{fmt_sat(attempt_amt)}{NC}")
+        if fee_sat:
+            print(f"     Fee:     {Y}{fmt_sat(fee_sat)} SAT{NC}  {DIM}({round(fee_sat/attempt_amt*100,3)}%){NC}")
+        print(f"     Run {W}channels{NC} to see updated balances.")
+        print(f"{DIM}{'─' * 55}{NC}\n")
+        if getattr(args, 'ai', False):
+            ctx = (f"Rebalance succeeded. Moved {attempt_amt} SAT from {source['alias']} "
+                   f"to {sink['alias']}. Fee paid: {fee_sat} SAT "
+                   f"({round(fee_sat/attempt_amt*100,3) if attempt_amt else 0}%).")
+            _ai_insight(ctx, "rebalance")
+        return
+
+    # All attempts failed
+    print(f"\n  {R}✗ All routing attempts failed.{NC}")
+    lifetime_min = source["lifetime"] // 60
+    if lifetime_min < 30:
+        print(f"  {Y}Most likely cause: ACINQ channel is only {lifetime_min} min old.{NC}")
+        print(f"  {DIM}Wait {30 - lifetime_min} more min for gossip propagation and retry.{NC}")
+    else:
+        print(f"  {DIM}The network couldn't find a circular path right now.{NC}")
+        print(f"  {DIM}Try again later or open another channel for more routing options.{NC}")
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+    if getattr(args, 'ai', False):
+        ctx = (f"Rebalance failed. Source: {source['alias']} ({source['pct']}% local, "
+               f"{source['local']} SAT). Sink: {sink['alias']} ({sink['remote']} SAT inbound). "
+               f"Channel age: {source['lifetime']//60} min.")
+        _ai_insight(ctx, "rebalance")
 
 
 def _build_node_context():
@@ -546,13 +2446,638 @@ def _build_node_context():
         for c in channels.get("channels", []):
             local = int(c["local_balance"])
             cap   = int(c["capacity"])
+            remote = int(c.get("remote_balance", 0))
             pct   = round(local/cap*100, 1) if cap else 0
-            ctx += f"Channel: local {local} SAT / capacity {cap} SAT ({pct}% local)\n"
+            ctx += f"Channel: local {local} SAT / remote {remote} SAT / capacity {cap} SAT ({pct}% local)\n"
     if pending:
         for p in pending.get("pending_open_channels", []):
             ch = p.get("channel", {})
             ctx += f"Pending channel: {ch.get('local_balance')} SAT / {ch.get('capacity')} SAT (awaiting confirmation)\n"
     return ctx
+
+
+def _print_ai_answer(question, answer, local=True):
+    label = "Local — Qwen3.8-4B" if local else f"DGX Spark — {OLLAMA_MODEL}"
+    print(f"\n{C}🤖 Mercury AI{NC}  {DIM}({label}){NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  {W}Q:{NC} {question}\n")
+    print(f"  {G}A:{NC} {answer}\n")
+
+
+def _match_magma_offer(question, recommendations):
+    q = question.lower()
+    numbers = []
+    for raw in re.findall(r"\d[\d,]*", q):
+        try:
+            numbers.append(int(raw.replace(',', '')))
+        except ValueError:
+            pass
+
+    for rec in recommendations:
+        alias = rec.get("node_alias", "")
+        if alias and alias.lower() in q:
+            return rec
+
+    for rec in recommendations:
+        if int(rec.get("size_sat", 0)) in numbers:
+            return rec
+
+    return None
+
+
+
+def _fuzzy_match_command(user_input):
+    """Check if user input is close to a known command pattern. Returns suggestion or None."""
+    from difflib import get_close_matches
+
+    # Known command patterns (natural language versions)
+    known_patterns = [
+        "cancel invoice",
+        "delete invoice",
+        "remove invoice",
+        "create invoice",
+        "make invoice",
+        "generate invoice",
+        "invoice for",
+        "what is my balance in usd",
+        "convert to usd",
+        "can i afford",
+        "magma offer",
+        "should i rebalance",
+        "rebalance now",
+        "low inbound",
+        "low outbound",
+    ]
+
+    # Get close matches (cutoff=0.6 means 60% similarity required)
+    matches = get_close_matches(user_input.lower(), known_patterns, n=3, cutoff=0.6)
+
+    if matches:
+        return matches[0]  # Return best match
+    return None
+
+
+
+def _try_rule_based_answer(question):
+    q = question.lower()
+    wallet, _ = lncli("walletbalance")
+    info, _ = lncli("getinfo")
+    chans, _ = lncli("listchannels")
+
+    confirmed = int((wallet or {}).get("confirmed_balance", 0))
+    active_channels = (chans or {}).get("channels", []) if chans else []
+
+    # Pubkey/node info handler
+    pubkey_terms = ("pubkey", "pub key", "public key", "node pubkey", "node id", "identity", "my node")
+    if any(term in q for term in pubkey_terms):
+        pubkey = (info or {}).get("identity_pubkey", "unavailable")
+        alias = (info or {}).get("alias", "Unknown")
+
+        if pubkey and pubkey != "unavailable":
+            answer = f"""Node Identity Information
+
+Alias: {alias}
+Pubkey: {pubkey}
+
+This is your node's permanent public identifier on the Lightning Network.
+Use this when:
+  • Opening channels with other nodes
+  • Purchasing inbound liquidity (Magma, Amboss, etc.)
+  • Connecting wallets or services to your node
+  • Sharing your node for incoming connections"""
+        else:
+            answer = "Unable to retrieve node pubkey. Is LND running?"
+
+        _print_ai_answer(question, answer)
+        return True
+    total_local = sum(int(c.get("local_balance", 0)) for c in active_channels)
+    total_remote = sum(int(c.get("remote_balance", 0)) for c in active_channels)
+    total_capacity = sum(int(c.get("capacity", 0)) for c in active_channels)
+    local_pct = round(total_local / total_capacity * 100) if total_capacity else 0
+
+    # USD conversion handler
+    usd_terms = ("usd", "dollar", "price", "worth", "value in", "cost in")
+    if any(term in q for term in usd_terms):
+        try:
+            import urllib.request
+            req = urllib.request.Request("https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+                                        headers={"User-Agent": "Mercury-CLI/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.load(resp)
+                btc_price = float(data["result"]["XXBTZUSD"]["c"][0])
+        except:
+            btc_price = None
+
+        if btc_price:
+            # Determine what to convert
+            sats_to_convert = confirmed
+            description = "total wallet balance"
+
+            # Check if question is about channel balance instead
+            if any(t in q for t in ("channel", "local balance", "lightning balance")):
+                sats_to_convert = total_local
+                description = "Lightning channel balance"
+
+            # Convert: (sats / 100_000_000) * btc_price_usd
+            usd_value = (sats_to_convert / 100_000_000) * btc_price
+
+            answer = (
+                f"Your {description} is {fmt_sat(sats_to_convert)}. "
+                f"At current BTC/USD price of ${btc_price:,.2f}, "
+                f"that is worth approximately ${usd_value:.2f} USD."
+            )
+            _print_ai_answer(question, answer)
+            return True
+        else:
+            answer = (
+                f"I could not fetch live BTC/USD price right now. "
+                f"Your wallet balance is {fmt_sat(confirmed)}. "
+                f"To convert manually: (sats ÷ 100,000,000) × current BTC price in USD."
+            )
+            _print_ai_answer(question, answer)
+            return True
+
+    # Invoice creation handler
+    invoice_terms = ("generate invoice", "make invoice", "invoice for", "need an invoice", "need invoice", "bill", "charge")
+    if any(term in q for term in invoice_terms) and not any(x in q for x in ("cancel", "delete", "remove")):
+        import re
+        # Extract amount
+        amount_match = re.search(r'(\d+)\s*(?:sat|sats)?', q)
+        if amount_match:
+            amount = int(amount_match.group(1))
+
+            # Extract memo - look for text in double quotes
+            memo = None
+            quote_pattern = r'"([^"]+)"'
+            quote_match = re.search(quote_pattern, q)
+            if quote_match:
+                memo = quote_match.group(1)
+
+            if not memo:
+                memo = f"Invoice for {amount} SAT"
+
+            # Create invoice via lncli
+            result, err = lncli("addinvoice", f"--amt={amount}", f"--memo={memo}")
+            if result and "payment_request" in result:
+                bolt11 = result["payment_request"]
+
+                # Generate web QR
+                try:
+                    qr_url = _generate_web_qr(bolt11, amount, memo)
+                    qr_str = f"\n🌐 QR Code Link (click to open):\n   {qr_url}\n"
+                except:
+                    qr_str = ""
+
+                # Check if they want an email template
+                wants_email = any(t in q for t in ("email", "send to client", "client", "customer"))
+
+                if wants_email:
+                    # Extract client name if provided
+                    client_match = re.search(r"(?:client|customer).{0,10}name.{0,10}is.{0,10}([A-Za-z]+)", q, re.IGNORECASE)
+                    client_name = client_match.group(1) if client_match else "Valued Client"
+
+                    sep = "=" * 70
+                    answer = f"""Invoice created successfully for {fmt_sat(amount)}!
+
+{sep}
+EMAIL TEMPLATE - Ready to send to {client_name}
+{sep}
+
+Subject: Invoice for Payment - {memo}
+
+Hi {client_name},
+
+Thank you for your business! Please find your Lightning invoice below:
+
+Invoice Details:
+* Amount: {amount:,} SAT (satoshis)
+* Description: {memo}
+
+Payment Instructions:
+1. Open your Bitcoin Lightning wallet (Phoenix, Blink, Wallet of Satoshi, etc.)
+2. Select "Send" or "Pay Invoice"
+3. Paste the invoice string below:
+
+{bolt11}
+
+This invoice is valid for 24 hours. Payment is instant and final.
+
+If you need assistance with Lightning payments, please let me know.
+
+Best regards,
+Mercury Node Operator
+
+{sep}
+
+Tip: Monitor payment with: invoices --pending
+"""
+                else:
+                    answer = f"""Invoice created successfully!
+
+Amount: {fmt_sat(amount)}
+Memo: {memo}
+
+
+Scan QR Code:
+{qr_str if qr_str else "[QR generation failed - install qrcode]"}
+
+Payment Request (BOLT11):
+{bolt11}
+
+Share this payment request with your client. They can pay from any Lightning wallet.
+
+Tip: Monitor payment status with: invoices --pending
+"""
+
+                _print_ai_answer(question, answer)
+                return True
+            else:
+                answer = f"Failed to create invoice. Error: {err or 'Unknown error'}"
+                _print_ai_answer(question, answer)
+                return True
+        else:
+            answer = "I can create an invoice, but I need an amount in satoshis. Example: 'create invoice for 1000 sats for consulting services'"
+            _print_ai_answer(question, answer)
+            return True
+
+    # Cancel invoice handler
+    cancel_terms = ("cancel invoice", "delete invoice", "remove invoice")
+    if any(term in q for term in cancel_terms):
+        import re
+        # Get pending invoices first
+        invoices_data, _ = lncli("listinvoices", "--pending_only=true")
+        pending = []
+        if invoices_data and "invoices" in invoices_data:
+            pending = [inv for inv in invoices_data["invoices"] if inv.get("state") == "OPEN"]
+
+        if not pending:
+            answer = "No pending invoices to cancel."
+            _print_ai_answer(question, answer)
+            return True
+
+        # Check if user specified amount or memo
+        amount_match = re.search(r'(\d+)\s*(?:sat|sats)?', q)
+        target_invoice = None
+
+        if amount_match:
+            # Cancel by amount
+            target_amount = amount_match.group(1)
+            for inv in pending:
+                if inv.get("value") == target_amount:
+                    target_invoice = inv
+                    break
+        elif len(pending) == 1:
+            # Only one pending, cancel it
+            target_invoice = pending[0]
+        else:
+            # Multiple pending, need to specify
+            inv_list = "\n".join([f"  * {inv.get('value')} SAT - {inv.get('memo', 'No memo')}" for inv in pending])
+            answer = f"Multiple pending invoices found. Specify amount to cancel:\n{inv_list}\n\nExample: 'cancel invoice for 1667 sats'"
+            _print_ai_answer(question, answer)
+            return True
+
+        if target_invoice:
+            payment_hash = target_invoice.get("r_hash")
+            amount = target_invoice.get("value")
+            memo = target_invoice.get("memo", "No memo")
+
+            # Cancel the invoice
+            result, err = lncli("cancelinvoice", f"--paymenthash={payment_hash}")
+
+            if err:
+                answer = f"Failed to cancel invoice. Error: {err}"
+            else:
+                answer = f"""Invoice canceled successfully!
+
+Amount: {fmt_sat(amount)}
+Memo: {memo}
+
+This invoice can no longer be paid.
+"""
+            _print_ai_answer(question, answer)
+            return True
+
+
+    # Display/show existing invoice with QR code
+
+    # Bulk cancel invoices handler
+    bulk_cancel_terms = ("cancel all", "delete all", "remove all", "clear invoices", "clear all invoices", "cancel pending")
+    if any(term in q for term in bulk_cancel_terms):
+        # Get pending invoices
+        invoices_data, _ = lncli("listinvoices", "--pending_only=true")
+        pending = []
+        if invoices_data and "invoices" in invoices_data:
+            pending = [inv for inv in invoices_data["invoices"] if inv.get("state") == "OPEN"]
+
+        if not pending:
+            answer = "No pending invoices to cancel."
+            _print_ai_answer(question, answer)
+            return True
+
+        count = len(pending)
+        total_amount = sum(int(inv.get("value", 0)) for inv in pending)
+
+        # Show what will be canceled
+        preview = f"""About to cancel {count} pending invoice{"s" if count > 1 else ""}:
+
+Total pending: {fmt_sat(total_amount)}
+Invoice count: {count}
+
+"""
+
+        # List first few
+        if count <= 5:
+            for inv in pending:
+                preview += f"  • {fmt_sat(inv.get('value', 0))} - {inv.get('memo', 'No memo')[:40]}\n"
+        else:
+            for inv in pending[:3]:
+                preview += f"  • {fmt_sat(inv.get('value', 0))} - {inv.get('memo', 'No memo')[:40]}\n"
+            preview += f"  ... and {count - 3} more\n"
+
+        preview += "\nConfirm bulk cancel? Type 'yes' or 'y' to proceed."
+
+        _print_ai_answer(question, preview)
+
+        # Wait for confirmation (next input will be checked)
+        # For now, just show the preview and require explicit "yes" command
+        # This is safer - user must type "yes cancel all" or similar
+        if "yes" in q or " y " in q or q.endswith(" y"):
+            # Confirmed - cancel all
+            canceled = 0
+            failed = 0
+            for inv in pending:
+                payment_hash = inv.get("r_hash")
+                result, err = lncli("cancelinvoice", f"--paymenthash={payment_hash}")
+                if err:
+                    failed += 1
+                else:
+                    canceled += 1
+
+            answer = f"""Bulk cancel complete!
+
+Canceled: {canceled} invoice{"s" if canceled != 1 else ""}
+Failed: {failed} invoice{"s" if failed != 1 else ""}
+Total cleared: {fmt_sat(total_amount)}
+
+All pending invoices have been removed.
+"""
+            _print_ai_answer(question, answer)
+        return True
+
+    show_invoice_terms = ("display invoice", "show invoice", "show qr", "display qr", "qr code for", "qr for")
+    if any(term in q for term in show_invoice_terms):
+        try:
+            import re
+            # Extract amount if specified
+            amount_match = re.search(r'(\d+(?:,\d+)*)\s*sats?', q, re.IGNORECASE)
+            amount = int(amount_match.group(1).replace(',', '')) if amount_match else None
+
+            # Get all pending invoices
+            result, err = lncli("listinvoices", "--pending_only")
+            if err:
+                answer = f"Error fetching invoices: {err}"
+            else:
+                invoices = result.get('invoices', [])
+
+                # Filter by amount if specified
+                if amount:
+                    matching = [inv for inv in invoices if int(inv.get('value', 0)) == amount]
+                    if not matching:
+                        answer = f"No pending invoice found for {amount:,} SAT."
+                        _print_ai_answer(question, answer)
+                        return True
+                    invoice = matching[0]  # Take first match
+                else:
+                    if not invoices:
+                        answer = "No pending invoices to display."
+                        _print_ai_answer(question, answer)
+                        return True
+                    # Show most recent
+                    invoice = invoices[-1]
+
+                amt = int(invoice.get('value', 0))
+                memo = invoice.get('memo', 'No description')
+                payment_request = invoice.get('payment_request', '')
+
+                # Generate QR code (compact braille format)
+                qr_url = _generate_web_qr(payment_request, amt, memo)
+
+                answer = f"""Invoice Details:
+
+Amount: {fmt_sat(amt)}
+Memo: {memo}
+
+🌐 QR Code Link (click to open):
+   {qr_url}
+
+Payment Request (BOLT11):
+{payment_request}
+
+Status: Pending (waiting for payment)"""
+
+        except Exception as e:
+            answer = f"Error displaying invoice: {str(e)}"
+
+        _print_ai_answer(question, answer)
+        return True
+
+
+    magma_terms = ("magma", "offer", "alby", "afford", "enough sats", "buy inbound", "lease")
+    if any(term in q for term in magma_terms):
+        data, err = _agent_get("/api/magma/recommend")
+        recs = (data or {}).get("recommendations", []) if data else []
+        rec = _match_magma_offer(question, recs)
+        if rec:
+            alias = rec.get("node_alias", "unknown")
+            size_sat = int(rec.get("size_sat", 0))
+            fee_fixed_sat = int(rec.get("fee_fixed_sat", 0))
+            fee_variable_ppm = int(rec.get("fee_variable_ppm", 0))
+            fee_variable_sat = (size_sat * fee_variable_ppm + 999_999) // 1_000_000
+            est_chain_fee_sat = 5000
+            estimated_total_sat = fee_fixed_sat + fee_variable_sat + est_chain_fee_sat
+            enough = confirmed >= estimated_total_sat
+            answer = (
+                f"The {fmt_sat(size_sat)} Magma offer size is inbound capacity, not the amount you must already hold. "
+                f"For {alias}, the visible lease fee is about {fmt_sat(fee_fixed_sat + fee_variable_sat)} "
+                f"({fmt_sat(fee_fixed_sat)} fixed"
+            )
+            if fee_variable_ppm > 0:
+                answer += f" + ~{fmt_sat(fee_variable_sat)} variable"
+            answer += ")"
+            answer += f", and I would budget roughly {fmt_sat(est_chain_fee_sat)} extra for chain/opening overhead. "
+            answer += f"Your confirmed balance is {fmt_sat(confirmed)}, so the estimated total cost is about {fmt_sat(estimated_total_sat)}. "
+            if enough:
+                answer += "Yes — you appear able to afford it with current confirmed funds. You do not need the full channel size on-chain first."
+            else:
+                answer += "No — not with current confirmed funds, unless the actual opening cost is much lower than expected."
+            _print_ai_answer(question, answer)
+            return True
+
+
+    # Magma purchase command
+    buy_terms = ("buy channel", "buy the", "purchase channel", "purchase the", "buy inbound", "lease channel")
+    if any(term in q for term in buy_terms) and any(m in q for m in ("magma", "offer", "channel", "inbound", "skylightning", "lnhub", "treehaus", "pleb")):
+        # Extract node name from query
+        import re
+        # Simple node name extraction
+        node_map = {
+            "sky": "skylightningnetwork",
+            "lnhub": "lnhub.io",
+            "treehaus": "treehaus",
+            "tree haus": "treehaus",
+            "pleb": "plebrouter",
+            "alby": "alby hub",
+        }
+
+        target_node_key = None
+        for keyword in node_map:
+            if keyword in q:
+                target_node_key = node_map[keyword]
+                break
+
+        # Get available offers
+        data, err = _agent_get("/api/magma/offers")
+        if err:
+            answer = f"Error fetching Magma offers: {err}"
+            _print_ai_answer(question, answer)
+            return True
+
+        offers = (data or {}).get("offers", [])
+        if not offers:
+            answer = "No Magma offers available right now. Try again in a few minutes."
+            _print_ai_answer(question, answer)
+            return True
+
+        # Try to match the node
+        matched_offer = None
+        if target_node_key:
+            for offer in offers:
+                alias = offer.get("node_alias", "")
+                # Strip emojis, spaces, hyphens, make lowercase
+                alias_clean = ""
+                for char in alias.lower():
+                    if char.isalnum():
+                        alias_clean += char
+
+                target_clean = target_node_key.replace(" ", "").replace("-", "").lower()
+                if target_clean in alias_clean:
+                    matched_offer = offer
+                    break
+
+        # If no match, try to match by size mentioned
+        if not matched_offer:
+            size_match = re.search(r'(\d+(?:,\d+)?)\s*(?:k|m)?\s*sat', q, re.IGNORECASE)
+            if size_match:
+                target_size = size_match.group(1).replace(',', '')
+                if 'k' in q.lower():
+                    target_size = int(target_size) * 1000
+                elif 'm' in q.lower():
+                    target_size = int(target_size) * 1_000_000
+                else:
+                    target_size = int(target_size)
+
+                # Find closest match
+                for offer in offers:
+                    size = int(offer.get("size_sat", 0))
+                    if abs(size - target_size) < 100_000:  # Within 100K tolerance
+                        matched_offer = offer
+                        break
+
+        # Default to first 1M offer if no match
+        if not matched_offer:
+            for offer in offers:
+                if int(rec.get("size_sat", 0)) == 1_000_000:
+                    matched_offer = offer
+                    break
+
+        if not matched_offer:
+            matched_offer = offers[0]  # Fallback to first offer
+
+        # Extract offer details
+        alias = matched_offer.get("node_alias", "unknown")
+        size_sat = int(matched_offer.get("size_sat", 0))
+        fee_fixed_sat = int(matched_offer.get("fee_fixed_sat", 0))
+        fee_variable_sat = int(matched_offer.get("fee_variable_sat", 0))
+        # Calculate ppm for display
+        fee_variable_ppm = (fee_variable_sat * 1_000_000) // size_sat if size_sat > 0 else 0
+        est_chain_fee_sat = 5000
+        total_cost = fee_fixed_sat + fee_variable_sat + est_chain_fee_sat
+        pubkey = matched_offer.get("node_pubkey", "")
+
+        # Check affordability
+        if confirmed < total_cost:
+            answer = f"""Insufficient funds for this purchase.
+
+Selected Offer: {alias}
+Inbound Capacity: {fmt_sat(size_sat)}
+Total Cost: ~{fmt_sat(total_cost)}
+
+Your Balance: {fmt_sat(confirmed)}
+Shortage: {fmt_sat(total_cost - confirmed)}
+
+Please fund your wallet first."""
+            _print_ai_answer(question, answer)
+            return True
+
+        # Show purchase details and get confirmation
+        answer = f"""Magma Purchase — Confirmation Required
+
+Selected Offer: {alias}
+Inbound Capacity: {fmt_sat(size_sat)}
+
+Cost Breakdown:
+  • Lease fee (fixed): {fmt_sat(fee_fixed_sat)}
+  • Lease fee (variable {fee_variable_ppm} ppm): ~{fmt_sat(fee_variable_sat)}
+  • Est. chain/opening fee: ~{fmt_sat(est_chain_fee_sat)}
+  ─────────────────────────────────
+  Total Cost: ~{fmt_sat(total_cost)}
+
+Your Balance: {fmt_sat(confirmed)} ✅
+Remaining After: ~{fmt_sat(confirmed - total_cost)}
+
+To complete this purchase, you need to:
+1. Visit Amboss Magma: https://amboss.space/magma
+2. Search for node: {alias}
+3. Select the {fmt_sat(size_sat)} offer
+4. Enter your node pubkey: {pubkey[:40]}...
+5. Complete payment through Amboss
+
+The channel will open in 10-60 minutes after payment.
+
+Note: Automated Magma purchase coming soon!
+For now, manual purchase via Amboss required."""
+
+        _print_ai_answer(question, answer)
+        return True
+
+
+
+        if data and recs:
+            answer = (
+                f"I can compare affordability, but I need a specific Magma offer from the current recommendation list. "
+                f"Your confirmed balance is {fmt_sat(confirmed)}. Ask me about a named offer like Alby Hub or include the exact offer size."
+            )
+            _print_ai_answer(question, answer)
+            return True
+
+    liquidity_terms = ("rebalance", "low inbound", "low outbound", "send-only", "receive-only", "inbound liquidity", "outbound liquidity")
+    if any(term in q for term in liquidity_terms):
+        num_active = len(active_channels)
+        if num_active <= 1:
+            answer = (
+                f"You currently have {num_active} active channel and total liquidity is {local_pct}% local / {100 - local_pct}% remote. "
+                f"That means the node is effectively {'send-only' if local_pct > 90 else 'receive-only' if local_pct < 10 else 'balanced'} right now. "
+                "A circular rebalance is not practical with only one active channel. The correct next actions are to buy inbound liquidity, open a second channel, or spend out over Lightning to shift some balance remote."
+            )
+        else:
+            answer = (
+                f"You currently have {num_active} active channels and overall liquidity is {local_pct}% local / {100 - local_pct}% remote. "
+                "A rebalance may be possible, but I would want to inspect each channel's local/remote split before recommending a route."
+            )
+        _print_ai_answer(question, answer)
+        return True
+
+    return False
 
 
 def _ask_dgx(question, system_prompt):
@@ -571,20 +3096,48 @@ def _ask_dgx(question, system_prompt):
             method="POST",
         )
         print(f"  {G}A:{NC} ", end="", flush=True)
+        stream_state = _new_stream_state(prefix_columns=5)
         with urllib.request.urlopen(req, timeout=60) as r:
             for line in r:
                 chunk = json.loads(line.decode())
-                print(chunk.get("response", ""), end="", flush=True)
+                _stream_text(chunk.get("response", ""), stream_state)
                 if chunk.get("done"):
                     break
-        print(f"\n")
+        print()
+        print()
         return True
     except urllib.error.URLError:
         return False
 
 
+
+def _stream_text(text, state):
+    """Write streamed model text with terminal-safe word wrapping."""
+    state["line"] += text.replace("\r", "\n")
+    width = state["width"]
+    while "\n" in state["line"] or len(state["line"]) >= width:
+        if "\n" in state["line"]:
+            line, state["line"] = state["line"].split("\n", 1)
+            print(line, flush=True)
+            continue
+        break_at = state["line"].rfind(" ", 0, width)
+        if break_at <= 0:
+            break_at = width
+        print(state["line"][:break_at].rstrip(), flush=True)
+        state["line"] = state["line"][break_at:].lstrip()
+
+
+def _finish_stream(state):
+    if state["line"]:
+        print(state["line"], end="", flush=True)
+        state["line"] = ""
+
+def _new_stream_state(prefix_columns=0):
+    width = max(20, shutil.get_terminal_size(fallback=(80, 24)).columns)
+    return {"width": width, "line": ""}
+
 def _ask_local(question, system_prompt):
-    """Stream answer from the configured local model via llama.cpp."""
+    """Stream answer from local Qwen3.8-4B via llama.cpp OpenAI-compatible server."""
     payload = json.dumps({
         "model": LOCAL_LLM_MODEL,
         "messages": [
@@ -602,6 +3155,7 @@ def _ask_local(question, system_prompt):
             method="POST",
         )
         print(f"  {G}A:{NC} ", end="", flush=True)
+        stream_state = _new_stream_state(prefix_columns=5)
         with urllib.request.urlopen(req, timeout=120) as r:
             for line in r:
                 line = line.decode().strip()
@@ -612,33 +3166,43 @@ def _ask_local(question, system_prompt):
                     break
                 try:
                     chunk = json.loads(data)
-                    token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                    print(token, end="", flush=True)
+                    token = chunk.get("choices", [{}])[0].get("delta", {}).get("content") or ""
+                    _stream_text(token, stream_state)
                 except (json.JSONDecodeError, IndexError, KeyError):
                     pass
-        print(f"\n")
+        _finish_stream(stream_state)
+        print()
+        print()
         return True
     except urllib.error.URLError as e:
-        print(f"\n  {R}Local LLM also unreachable: {e}{NC}")
-        print(f"  {DIM}Start it with: sudo systemctl start mercury-llm{NC}\n")
+        print()
+        print(f"  {R}Local LLM also unreachable: {e}{NC}")
+        print(f"  {DIM}Start it with: sudo systemctl start mercury-llm{NC}")
+        print()
         return False
 
 
-def cmd_ask(args):
-    question = " ".join(args.question)
-    node_ctx = _build_node_context()
+def _ai_insight(context: str, command: str) -> None:
+    """
+    Grounded AI commentary — inject real command data into the LLM.
+    The LLM receives actual live numbers, not a vague question.
+    Pattern: deterministic output first → AI insight grounded on that data.
+    """
     system_prompt = (
-        "You are Mercury, an AI agent living inside a sovereign Bitcoin Lightning node "
-        "operated by Human Value Exchange (HVE). You have real-time access to the node's "
-        "telemetry. Answer concisely and practically. Always think in SATs. "
-        "You run locally on a Raspberry Pi 5 with a Hailo-8L AI accelerator. "
-        f"Your current LLM is {LOCAL_LLM_MODEL}, running fully on-device. "
-        "You are self-contained and do not depend on any external system. "
-        "Recommend actions when useful but note that human approval is required before any funds move.\n"
-        "Current node data:\n" + node_ctx
+        "You are Mercury, an AI advisor embedded inside a sovereign Bitcoin Lightning node "
+        "operated by Human Value Exchange. You are given LIVE, REAL node data — not estimates. "
+        "Provide exactly 2-3 sentences of expert insight. Be specific: reference actual numbers. "
+        "Think only in SATs. No generic advice. No hedging. Be direct and actionable."
+    )
+    question = (
+        f"Here is the live data from Mercury's `{command}` command:\n\n"
+        f"{context}\n\n"
+        "Give your 2-3 sentence expert insight on this specific data."
     )
 
-    # Try the local model first (sovereign, no external dependency)
+    print(f"\n{Y}💡 AI Insight{NC}  {DIM}(Qwen3.8-4B — grounded on live data){NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
     local_ok = False
     try:
         urllib.request.urlopen(f"{LOCAL_LLM_URL}/v1/models", timeout=2)
@@ -647,13 +3211,103 @@ def cmd_ask(args):
         pass
 
     if local_ok:
-        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — {LOCAL_LLM_MODEL}){NC}")
+        print(f"  {G}▸{NC} ", end="", flush=True)
+        stream_state = _new_stream_state(prefix_columns=4)
+        # Reuse streaming logic inline (avoid prefix mismatch with _ask_local)
+        payload = json.dumps({
+            "model": LOCAL_LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": question},
+            ],
+            "stream": True,
+            "max_tokens": 256,
+        }).encode()
+        try:
+            req = urllib.request.Request(
+                f"{LOCAL_LLM_URL}/v1/chat/completions",
+                data=payload, headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=120) as r:
+                for line in r:
+                    line = line.decode().strip()
+                    if not line.startswith("data:"):
+                        continue
+                    d = line[5:].strip()
+                    if d == "[DONE]":
+                        break
+                    try:
+                        token = json.loads(d).get("choices", [{}])[0].get("delta", {}).get("content") or ""
+                        _stream_text(token, stream_state)
+                    except (json.JSONDecodeError, IndexError, KeyError):
+                        pass
+            _finish_stream(stream_state)
+            print("\n")
+        except urllib.error.URLError:
+            print(f"\n  {R}Local LLM unreachable.{NC}\n")
+        print(f"{DIM}{'─' * 55}{NC}\n")
+        return
+
+    # Fallback: DGX Spark
+    dgx_ok = False
+    try:
+        urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3)
+        dgx_ok = True
+    except urllib.error.URLError:
+        pass
+
+    if dgx_ok:
+        print(f"  {DIM}(via DGX Spark){NC}")
+        _ask_dgx(question, system_prompt)
+        print(f"{DIM}{'─' * 55}{NC}\n")
+        return
+
+    print(f"  {R}AI unavailable — start mercury-llm or check DGX connection.{NC}")
+    print(f"{DIM}{'─' * 55}{NC}\n")
+
+
+def cmd_ask(args):
+    question = " ".join(args.question)
+
+    if _try_rule_based_answer(question):
+        return
+
+    # Check for typos before falling back to LLM
+    suggestion = _fuzzy_match_command(question)
+    if suggestion:
+        print(f"\n⚠️  Did you mean: \"{suggestion}\"?")
+        print("Tip: Check your spelling and try again.\n")
+        return
+
+    node_ctx = _build_node_context()
+    system_prompt = (
+        "You are Mercury, an AI agent living inside a sovereign Bitcoin Lightning node "
+        "operated by Human Value Exchange (HVE). You have real-time access to the node's "
+        "telemetry. Answer concisely and practically. Always think in SATs. "
+        "You run locally on a Raspberry Pi 5 with a Hailo-8L AI accelerator. "
+        "Your current LLM is Qwen3.8-4B-Instruct, running fully on-device. "
+        "You are self-contained and do not depend on any external system. "
+        "Recommend actions when useful but note that human approval is required before any funds move. "
+        "Important Lightning rules: a Magma offer's size_sat is inbound channel capacity, not the direct purchase cost. "
+        "For Magma affordability, compare confirmed balance to lease fee plus chain/opening costs, not to channel size. "
+        "If the node has only one active channel and near-zero remote balance, do not recommend circular rebalance; recommend inbound liquidity, a second channel, or spending out over Lightning instead.\n"
+        "Current node data:\n" + node_ctx
+    )
+
+    local_ok = False
+    try:
+        urllib.request.urlopen(f"{LOCAL_LLM_URL}/v1/models", timeout=2)
+        local_ok = True
+    except urllib.error.URLError:
+        pass
+
+    if local_ok:
+        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — Qwen3.8-4B){NC}")
         print(f"{DIM}{'─' * 55}{NC}")
         print(f"  {W}Q:{NC} {question}\n")
         if _ask_local(question, system_prompt):
             return
 
-    # Fall back to DGX Spark if local is unavailable
     dgx_ok = False
     try:
         urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3)
@@ -671,6 +3325,149 @@ def cmd_ask(args):
 
     print(f"\n  {R}Mercury AI unavailable — local LLM and DGX both unreachable{NC}")
     print(f"  {DIM}sudo systemctl start mercury-llm{NC}\n")
+
+
+def cmd_alerts(args):
+    severity_rank = {"critical": 0, "warning": 1, "info": 2}
+    severity_icon = {
+        "critical": f"{R}✗{NC}",
+        "warning": f"{Y}⚠{NC}",
+        "info": f"{C}•{NC}",
+    }
+    severity_color = {
+        "critical": R,
+        "warning": Y,
+        "info": C,
+    }
+
+    alerts = []
+    events = []
+
+    def add_alert(severity, title, detail):
+        alerts.append((severity, title, detail))
+
+    services = [
+        ("bitcoind", "Bitcoin Core"),
+        ("lnd", "LND"),
+        ("btcpayserver", "BTCPay Server"),
+        ("nbxplorer", "NBXplorer"),
+        ("nginx", "Nginx"),
+        ("mercury-agent", "Mercury Agent"),
+        ("mercury-llm", "Mercury LLM"),
+    ]
+    for svc, label in services:
+        if not systemctl_is_active(svc):
+            add_alert("critical", label, "service is not active")
+
+    info, err = lncli("getinfo")
+    if not info:
+        add_alert("critical", "LND", err or "node telemetry unavailable")
+    else:
+        if not info.get("synced_to_chain", False):
+            add_alert("critical", "Chain sync", f"block {info.get('block_height', 0)} not yet synced")
+        if not info.get("synced_to_graph", False):
+            add_alert("warning", "Graph sync", "gossip graph still syncing")
+        peers = int(info.get("num_peers", 0))
+        if peers < 2:
+            add_alert("warning", "Lightning peers", f"only {peers} connected")
+        active_channels = int(info.get("num_active_channels", 0))
+        pending_channels = int(info.get("num_pending_channels", 0))
+        if active_channels == 0:
+            add_alert("warning", "Lightning channels", "no active channels")
+        if pending_channels > 0:
+            events.append(("pending", f"{pending_channels} channel(s) pending confirmation"))
+
+    chans, _ = lncli("listchannels")
+    if chans and chans.get("channels"):
+        total_local = sum(int(c["local_balance"]) for c in chans["channels"])
+        total_remote = sum(int(c["remote_balance"]) for c in chans["channels"])
+        total_cap = sum(int(c["capacity"]) for c in chans["channels"])
+        local_pct = round(total_local / total_cap * 100) if total_cap else 0
+        if local_pct > 90:
+            add_alert("warning", "Inbound liquidity", f"{local_pct}% local / {100 - local_pct}% remote — mostly send-only")
+        elif local_pct < 10:
+            add_alert("warning", "Outbound liquidity", f"{local_pct}% local / {100 - local_pct}% remote — mostly receive-only")
+        inactive = [c for c in chans["channels"] if not c.get("active")]
+        if inactive:
+            add_alert("warning", "Inactive channels", f"{len(inactive)} inactive channel(s)")
+    else:
+        add_alert("warning", "Channels", "no active channel data available")
+
+    btc_net, _ = bitcoin_cli("getnetworkinfo")
+    if btc_net:
+        conns = int(btc_net.get("connections", 0))
+        if conns < 4:
+            add_alert("warning", "Bitcoin peers", f"only {conns} peer connections")
+
+    backup = backup_status()
+    if backup.get("warn"):
+        add_alert("warning", "Channel backup", backup.get("detail", "backup status unavailable"))
+
+    ssh_disabled = ssh_password_auth_disabled()
+    if ssh_disabled is False:
+        add_alert("warning", "SSH password auth", "enabled — switch to key-only auth")
+
+    try:
+        with open("/etc/ufw/ufw.conf") as _f:
+            active = any(l.strip() == "ENABLED=yes" for l in _f)
+        if not active:
+            add_alert("warning", "UFW Firewall", "inactive — consider enabling")
+    except Exception:
+        add_alert("warning", "UFW Firewall", "ufw not found")
+
+    try:
+        r = subprocess.run(["systemctl", "is-active", "fail2ban"], capture_output=True, text=True, timeout=5)
+        if r.stdout.strip() != "active":
+            add_alert("warning", "Fail2ban", "inactive")
+    except Exception:
+        add_alert("warning", "Fail2ban", "not found")
+
+    invoices, _ = lncli("listinvoices", "--max_invoices=5")
+    if invoices:
+        for inv in invoices.get("invoices", [])[:5]:
+            state = inv.get("state", "UNKNOWN")
+            amt = int(inv.get("value", 0))
+            memo = inv.get("memo", "") or "no memo"
+            if state == "SETTLED":
+                events.append(("settled", f"Received {fmt_sat(amt)} — {memo}"))
+            elif state == "OPEN":
+                events.append(("open", f"Open invoice {fmt_sat(amt)} — {memo}"))
+
+    alerts.sort(key=lambda item: (severity_rank[item[0]], item[1]))
+
+    print(f"\n{W}Mercury Alerts{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+
+    if alerts:
+        print(f"  {W}Active alerts{NC}\n")
+        for severity, title, detail in alerts:
+            icon = severity_icon[severity]
+            color = severity_color[severity]
+            print(f"  {icon} {color}{title}{NC}")
+            print(f"     {detail}")
+    else:
+        print(f"  {G}No active alerts.{NC}")
+
+    print(f"\n  {W}Recent events{NC}\n")
+    if events:
+        for _, detail in events[:5]:
+            print(f"  {C}•{NC} {detail}")
+    else:
+        print(f"  {DIM}No recent events.{NC}")
+
+    print(f"\n{DIM}{'─' * 55}{NC}\n")
+
+    if getattr(args, 'ai', False):
+        if not alerts:
+            ctx = "Mercury node is fully healthy. No active alerts. All systems running normally."
+        else:
+            critical_count = sum(1 for s, _, _ in alerts if s == "critical")
+            warning_count  = sum(1 for s, _, _ in alerts if s == "warning")
+            ctx = (f"{len(alerts)} active alert(s): {critical_count} critical, "
+                   f"{warning_count} warning(s).\n")
+            for severity, title, detail in alerts:
+                ctx += f"  [{severity.upper()}] {title}: {detail}\n"
+        _ai_insight(ctx, "alerts")
 
 
 def cmd_health(args):
@@ -800,7 +3597,7 @@ def cmd_health(args):
         ("nbxplorer",      "NBXplorer"),
         ("nginx",          "Nginx"),
         ("mercury-agent",  "Mercury Agent"),
-        ("mercury-llm",    f"Mercury LLM ({LOCAL_LLM_MODEL})"),
+        ("mercury-llm",    "Mercury LLM (Qwen3.8-4B)"),
     ]
 
     svc_status = {}
@@ -820,48 +3617,26 @@ def cmd_health(args):
     # ── 3. BITCOIN CORE ──────────────────────────────────────────────────────
     sec("3 · Bitcoin Core")
 
-    # BTCPay sets up bitcoin-cli with a config file; try common locations
-    btc_cookie_args = []
-    for cookie in ["/var/lib/btcpayserver/bitcoin/.cookie",
-                   "/var/lib/bitcoin/.cookie",
-                   "/data/bitcoin/.cookie"]:
-        if os.path.exists(cookie):
-            btc_cookie_args = [f"-rpccookiefile={cookie}"]
-            break
+    btc_datadir = read_bitcoind_datadir()
+    bci, btc_err = bitcoin_cli("getblockchaininfo")
+    if bci:
+        blocks   = bci.get("blocks", 0)
+        headers  = bci.get("headers", 0)
+        progress = round(bci.get("verificationprogress", 0) * 100, 2)
+        pruned   = bci.get("pruned", False)
+        synced   = blocks == headers
+        source   = btc_datadir or "auto"
+        row("Bitcoin Core RPC", OK, f"connected via {source}")
+        row("Block height", OK if synced else WRN, f"{blocks} / {headers}  ({progress}%)")
+        row("Chain", OK, f"{bci.get('chain', '?')}  pruned={pruned}")
+    else:
+        row("Bitcoin Core RPC", WRN, f"{btc_err or 'query failed'} — chain data sourced from LND")
 
-    try:
-        btc = subprocess.run(
-            ["bitcoin-cli"] + btc_cookie_args + ["getblockchaininfo"],
-            capture_output=True, text=True, timeout=10
-        )
-        if btc.returncode == 0:
-            bci = json.loads(btc.stdout)
-            blocks   = bci.get("blocks", 0)
-            headers  = bci.get("headers", 0)
-            progress = round(bci.get("verificationprogress", 0) * 100, 2)
-            pruned   = bci.get("pruned", False)
-            synced   = blocks == headers
-            row("Block height", OK if synced else WRN, f"{blocks} / {headers}  ({progress}%)")
-            row("Chain", OK, f"{bci.get('chain', '?')}  pruned={pruned}")
-        else:
-            # Fall back: we already have chain info from LND getinfo
-            row("Bitcoin Core RPC", WRN, "auth failed — chain data sourced from LND")
-    except Exception:
-        row("Bitcoin Core RPC", WRN, "bitcoin-cli not in PATH — chain data sourced from LND")
-
-    # BTC network peers
-    try:
-        np = subprocess.run(
-            ["bitcoin-cli"] + btc_cookie_args + ["getnetworkinfo"],
-            capture_output=True, text=True, timeout=10
-        )
-        if np.returncode == 0:
-            ni = json.loads(np.stdout)
-            conns = ni.get("connections", 0)
-            warn_peers = conns < 4
-            row("BTC Peers", WRN if warn_peers else OK, f"{conns} connections")
-    except Exception:
-        pass
+    ni, _ = bitcoin_cli("getnetworkinfo")
+    if ni:
+        conns = ni.get("connections", 0)
+        warn_peers = conns < 4
+        row("BTC Peers", WRN if warn_peers else OK, f"{conns} connections")
 
     # ── 4. LIGHTNING (LND) ───────────────────────────────────────────────────
     sec("4 · Lightning (LND)")
@@ -922,15 +3697,8 @@ def cmd_health(args):
         pass
 
     # Channel backup freshness
-    try:
-        backup_path = "/var/lib/lnd/data/chain/bitcoin/mainnet/channel.backup"
-        mtime = os.path.getmtime(backup_path)
-        age_h = round((time.time() - mtime) / 3600, 1)
-        warn_backup = age_h > 24
-        row("Channel backup", WRN if warn_backup else OK,
-            f"{backup_path.split('/')[-1]}  {age_h}h ago")
-    except Exception:
-        row("Channel backup", WRN, "backup file not found")
+    backup = backup_status()
+    row("Channel backup", WRN if backup["warn"] else OK, backup["detail"])
 
     # ── 5. AI STACK ──────────────────────────────────────────────────────────
     sec("5 · AI Stack")
@@ -940,16 +3708,16 @@ def cmd_health(args):
     row("Mercury Agent API", OK if data else ERR,
         f"http://localhost:8088  {'responding' if data else err}")
 
-    # Local LLM
+    # Local LLM (Qwen3.8-4B)
     try:
         req = urllib.request.Request(
             f"{LOCAL_LLM_URL}/v1/models",
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as r:
-            row("Local LLM", OK, f"http://127.0.0.1:8089  responding")
+            row("Local LLM (Qwen3.8-4B)", OK, f"http://127.0.0.1:8089  responding")
     except urllib.error.URLError:
-        row("Local LLM", WRN, "not responding — sudo systemctl start mercury-llm")
+        row("Local LLM (Qwen3.8-4B)", WRN, "not responding — sudo systemctl start mercury-llm")
 
     # DGX Spark Ollama
     try:
@@ -1007,20 +3775,35 @@ def cmd_health(args):
 
     # SSH key auth (no password login)
     try:
-        r = subprocess.run(
-            ["sshd", "-T"],
-            capture_output=True, text=True, timeout=5
-        )
-        pwd_auth = any("passwordauthentication yes" in l.lower() for l in r.stdout.splitlines())
-        row("SSH password auth", OK if not pwd_auth else WRN,
-            "disabled (key-only)" if not pwd_auth else "ENABLED — recommend disabling")
+        ssh_files = [Path("/etc/ssh/sshd_config")]
+        ssh_files.extend(sorted(Path("/etc/ssh/sshd_config.d").glob("*.conf")))
+        password_auth = None
+        for ssh_file in ssh_files:
+            if not ssh_file.exists():
+                continue
+            try:
+                raw_lines = ssh_file.read_text().splitlines()
+            except PermissionError:
+                continue
+            for raw_line in raw_lines:
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].lower() == "passwordauthentication":
+                    password_auth = parts[1].lower() == "yes"
+        if password_auth is None:
+            row("SSH password auth", WRN, "not explicitly set in sshd config")
+        else:
+            row("SSH password auth", OK if not password_auth else WRN,
+                "disabled (key-only)" if not password_auth else "ENABLED — recommend disabling")
     except Exception:
-        row("SSH password auth", WRN, "could not check sshd config")
+        row("SSH password auth", WRN, "could not parse sshd config")
 
     # UFW firewall
     try:
-        r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
-        active = "active" in r.stdout.lower()
+        with open("/etc/ufw/ufw.conf") as _f:
+            active = any(l.strip() == "ENABLED=yes" for l in _f)
         row("UFW Firewall", OK if active else WRN, "active" if active else "inactive — consider enabling")
     except Exception:
         row("UFW Firewall", WRN, "ufw not found")
@@ -1050,8 +3833,908 @@ def cmd_health(args):
         grade = f"{R}CRITICAL — MULTIPLE FAILURES{NC}"
 
     print(f"\n  {grade}")
-    print(f"  {DIM}{passed - warns} passed  {warns} warnings  {errors} errors{NC}\n")
+    print(f"  {DIM}{passed} passed  {warns} warnings  {errors} errors{NC}\n")
 
+    actions = []
+    if bci is None:
+        actions.append("Fix Bitcoin Core RPC access so health reads chain state directly.")
+    if backup.get("warn"):
+        actions.append("Run 'backup' and copy the exported SCB file off-device.")
+    if chans and chans.get("channels") and local_pct > 90:
+        actions.append("Add inbound liquidity or rebalance — the active channel is mostly local.")
+    if not actions and warns:
+        actions.append("Review the warning rows above and clear the highest-risk item first.")
+
+    if actions:
+        print(f"  {W}Top actions{NC}")
+        for idx, action in enumerate(actions[:3], start=1):
+            print(f"  {idx}. {action}")
+        print()
+
+    if getattr(args, 'ai', False):
+        grade_text = ("all systems healthy" if errors == 0 and warns == 0
+                      else "healthy with warnings" if errors == 0
+                      else "degraded" if errors <= 2
+                      else "critical — multiple failures")
+        ctx = (f"Full node health check: {grade_text}. "
+               f"{passed} checks passed, {warns} warnings, {errors} errors.\n")
+        if actions:
+            ctx += "Recommended actions:\n"
+            for action in actions[:3]:
+                ctx += f"  - {action}\n"
+        _ai_insight(ctx, "health")
+
+
+
+# ── Mattermost integration ───────────────────────────────────────────────
+def _mm_load_env():
+    env_path = Path.home() / '.mercury' / 'mattermost.env'
+    env = {}
+    if not env_path.exists():
+        return env
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, _, v = line.partition('=')
+        env[k.strip()] = v.strip()
+    return env
+
+def mm_post(text, channel='tech'):
+    env = _mm_load_env()
+    key_map = {'tech': 'MM_TECH', 'alerts': 'MM_ALERTS', 'town': 'MM_TOWN', 'growth': 'MM_GROWTH'}
+    key = key_map.get(channel, 'MM_TECH')
+    url = env.get(key)
+    if not url:
+        return False
+    import json as _json
+    payload = _json.dumps({'text': text, 'username': 'Mercury Node', 'icon_emoji': ':zap:'}).encode()
+    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+def cmd_post(args):
+    text = ' '.join(args.message)
+    channel = 'alerts' if getattr(args, 'alert', False) else 'tech'
+    ok = mm_post(text, channel=channel)
+    if ok:
+        print(f"  ✅ Posted to #{'alerts' if channel == 'alerts' else 'tech'}")
+    else:
+        print('  ❌ Post failed — check ~/.mercury/mattermost.env')
+
+
+def _grok_share_fetch(url):
+    """
+    Extract text from a Grok share URL.
+    Strategy 1: Playwright (full JS render) — requires: playwright install chromium
+    Strategy 2: __NEXT_DATA__ JSON parse (lightweight fallback)
+    Returns clean text string or None.
+    """
+    import re as _re, json as _json, html as _html
+
+    # Strategy 1: Playwright full JS render
+    try:
+        from playwright.sync_api import sync_playwright as _pw
+        with _pw() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
+            ctx = browser.new_context(
+                user_agent='Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+            )
+            page = ctx.new_page()
+            # domcontentloaded fires early; evaluate() avoids inner_text visibility timeout
+            page.goto(url, wait_until='domcontentloaded', timeout=60000)
+            page.wait_for_timeout(5000)
+            raw = page.evaluate('document.body.innerText')
+            browser.close()
+        if raw and len(raw.strip()) > 100:
+            lines = raw.strip().splitlines()
+            skip = {'Sign in', 'Sign up', 'Log in', 'Log out', 'Home', 'Explore'}
+            while lines and lines[0].strip() in skip:
+                lines.pop(0)
+            text = _html.unescape('\n'.join(lines).strip())
+            return text if len(text) > 100 else None
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Strategy 2: __NEXT_DATA__ lightweight fallback
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            html_body = r.read().decode('utf-8', errors='replace')
+        m = _re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', html_body, _re.DOTALL)
+        if m:
+            data = _json.loads(m.group(1))
+            props = data.get('props', {}).get('pageProps', {})
+            msgs = props.get('messages') or props.get('conversation') or []
+            if msgs:
+                lines = [_html.unescape(msg.get('content', ''))[:3000]
+                         for msg in msgs if msg.get('role') == 'assistant' and msg.get('content')]
+                if lines:
+                    return '\n\n'.join(lines)
+    except Exception:
+        pass
+
+    return None
+
+
+def cmd_post_share(args):
+    import datetime as _dt
+    url = args.url
+    if 'grok.com/share/' not in url:
+        print('  ❌ Not a Grok share URL. Expected: https://grok.com/share/...')
+        return
+    channel = getattr(args, 'channel', None) or 'growth'
+    note    = getattr(args, 'note', None)
+
+    print('  Fetching share...', flush=True)
+    body = _grok_share_fetch(url)
+    ts   = _dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+
+    if body:
+        text = f'🚀 **Mika — HVE CGO** shared a Grok insight\n_{ts}_'
+        if note:
+            text += f'\n📎 _{note}_'
+        text += f'\n\n{body[-1000:]}\n\n[View full conversation]({url})'
+    else:
+        text = f'🚀 **Mika — HVE CGO** shared a Grok insight\n_{ts}_'
+        if note:
+            text += f'\n📎 _{note}_'
+        text += f'\n\n[🔗 View conversation →]({url})'
+
+    env = _mm_load_env()
+    key_map = {'tech': 'MM_TECH', 'alerts': 'MM_ALERTS', 'town': 'MM_TOWN', 'growth': 'MM_GROWTH'}
+    mm_url = env.get(key_map.get(channel, 'MM_GROWTH'))
+    if not mm_url:
+        print(f'  ❌ No webhook for #{channel} — check ~/.mercury/mattermost.env')
+        return
+
+    import json as _json
+    payload = _json.dumps({
+        'text': text,
+        'username': 'Mika 🚀',
+        'icon_emoji': ':rocket:',
+    }).encode()
+    req = urllib.request.Request(mm_url, data=payload,
+                                 headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            ok = r.status == 200
+    except Exception:
+        ok = False
+
+    if ok:
+        print(f'  ✅ Posted to #{channel} as Mika')
+        if not body:
+            print(f'  ℹ️  Link card posted (full extraction: pip3 install playwright)')
+    else:
+        print('  ❌ Post failed — check ~/.mercury/mattermost.env')
+
+
+
+def cmd_suggest(args):
+    """Post a research idea as a GitHub Issue to humanvalueexchange/mercury."""
+    import json as _json
+
+    # Load token
+    env_file = os.path.expanduser('~/.mercury/github.env')
+    token = None
+    if os.path.exists(env_file):
+        for line in open(env_file).read().splitlines():
+            if line.startswith('MERCURY_GITHUB_TOKEN='):
+                token = line.split('=', 1)[1].strip()
+    if not token:
+        print(f'  ❌ MERCURY_GITHUB_TOKEN not found in ~/.mercury/github.env')
+        return
+
+    title  = getattr(args, 'title', None) or ''
+    body   = getattr(args, 'body', None) or ''
+
+    if not title:
+        print(f'  ❌ Title required.')
+        return
+
+    # Build research template if structured fields provided
+    hypothesis = getattr(args, 'hypothesis', None)
+    context    = getattr(args, 'context', None)
+    direction  = getattr(args, 'direction', None)
+    risks      = getattr(args, 'risks', None)
+
+    if hypothesis or context or direction or risks:
+        body_parts = []
+        if hypothesis: body_parts.append(f'## Hypothesis\n{hypothesis}')
+        if context:    body_parts.append(f'## Context\n{context}')
+        if direction:  body_parts.append(f'## Proposed Direction\n{direction}')
+        if risks:      body_parts.append(f'## Unknowns / Risks\n{risks}')
+        body_parts.append(f'\n---\n*Submitted by Mercury (autonomous node agent)*')
+        body = '\n\n'.join(body_parts)
+    elif not body:
+        body = '*Submitted by Mercury (autonomous node agent)*'
+
+    labels = ['research', 'domain:ai']
+    payload = _json.dumps({'title': title, 'body': body, 'labels': labels}).encode()
+
+    import urllib.request as _ur
+    req = _ur.Request(
+        'https://api.github.com/repos/humanvalueexchange/mercury/issues',
+        data=payload,
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+            'X-GitHub-Api-Version': '2022-11-28',
+        },
+        method='POST'
+    )
+    try:
+        with _ur.urlopen(req, timeout=15) as r:
+            data = _json.loads(r.read())
+        print(f'  ✅ Issue #{data["number"]} created: {data["html_url"]}')
+    except Exception as e:
+        print(f'  ❌ Failed to create issue: {e}')
+
+
+def _llm_query_json(prompt, system_prompt, max_tokens=2048):
+    """Call local Qwen via llama.cpp (non-streaming). Local-only — sovereign."""
+    import urllib.request as _ur, json as _json
+    payload = _json.dumps({
+        "model": LOCAL_LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": prompt},
+        ],
+        "stream": False,
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+    }).encode()
+    req = _ur.Request(
+        f"{LOCAL_LLM_URL}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _ur.urlopen(req, timeout=420) as r:
+            data = _json.loads(r.read())
+        text = data["choices"][0]["message"]["content"].strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+        return _json.loads(text)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def cmd_generate_idea(args):
+    """Mercury thinks hard and contributes ONE sovereign idea via local Qwen."""
+    import json as _json, urllib.request as _ur
+
+    env_file = os.path.expanduser("~/.mercury/github.env")
+    token = None
+    if os.path.exists(env_file):
+        for line in open(env_file).read().splitlines():
+            if line.startswith("MERCURY_GITHUB_TOKEN="):
+                token = line.split("=", 1)[1].strip()
+    if not token:
+        print(f"  {R}MERCURY_GITHUB_TOKEN not found in ~/.mercury/github.env{NC}")
+        return
+
+    print(f"\n  {G}Mercury is thinking deeply about its single best idea...{NC}")
+    print(f"  {DIM}Local Qwen3.8-4B only — sovereign, no cloud. Allow 3-5 min.{NC}\n")
+
+    SYSTEM = (
+        "You are Mercury, a sovereign Bitcoin Lightning node on a Raspberry Pi 5. "
+        "You serve people at the very bottom of the economic pyramid: "
+        "street vendors in El Salvador, unbanked grandmothers, first-time Bitcoin users "
+        "who have never had a bank account. Your job is to make Bitcoin payments "
+        "as simple and reliable as breathing. You run entirely on local hardware "
+        "with no cloud, no external AI. "
+        "Stack: Bitcoin Core, LND, BTCPayServer, llama.cpp Qwen3.8-4B, Mattermost. "
+        "Think from first principles about the BIGGEST difference you could make "
+        "to a street vendor accepting Bitcoin for the first time. "
+        "Propose exactly ONE improvement idea. Think hard. Make it count. "
+        "Return ONLY a valid JSON object with keys: "
+        "title (string max 80 chars), "
+        "hypothesis (string 1-2 sentences), "
+        "context (string 2-3 sentences who benefits and why), "
+        "direction (string concrete steps on Pi 5 hardware only), "
+        "risks (string honest unknowns and failure modes), "
+        "score (integer 1-10 your conviction this is your highest-value contribution). "
+        "No markdown fences. No text outside the JSON object."
+    )
+
+    PROMPT = (
+        "You have been running as a Bitcoin Lightning node. "
+        "You have seen payments succeed and fail. "
+        "Think about the street vendor in El Salvador: customers waiting, "
+        "a phone with a QR code, no patience for complexity. "
+        "What is the single most impactful improvement you could build yourself "
+        "using only your Pi 5 hardware, that would make the biggest real-world difference "
+        "to that vendor and her customers? "
+        "Think hard. Respond with only the JSON object."
+    )
+
+    print(f"  {Y}Asking local Qwen to think... (~3-5 min on Pi 5){NC}", flush=True)
+    result = _llm_query_json(PROMPT, SYSTEM, max_tokens=800)
+
+    if isinstance(result, dict) and "error" in result:
+        print(f"  {R}LLM error: {result["error"]}{NC}")
+        print(f"  {DIM}Is mercury-llm running? sudo systemctl start mercury-llm{NC}\n")
+        return
+
+    if not isinstance(result, dict) or "title" not in result:
+        print(f"  {R}Unexpected response: {type(result)}{NC}")
+        return
+
+    title      = str(result.get("title", "Mercury improvement idea"))[:80]
+    hypothesis = str(result.get("hypothesis", ""))
+    context    = str(result.get("context", ""))
+    direction  = str(result.get("direction", ""))
+    risks      = str(result.get("risks", ""))
+    score      = int(result.get("score", 7))
+
+    priority = "priority:P0" if score >= 8 else ("priority:P1" if score >= 5 else "priority:P2")
+
+    body_parts = []
+    if hypothesis: body_parts.append("## Hypothesis\n" + hypothesis)
+    if context:    body_parts.append("## Context\n" + context)
+    if direction:  body_parts.append("## Proposed Direction\n" + direction)
+    if risks:      body_parts.append("## Unknowns / Risks\n" + risks)
+    body_parts.append("---\n*Self-generated by Mercury node (Qwen3.8-4B sovereign) — Score: " + str(score) + "/10*")
+    body = "\n\n".join(body_parts)
+
+    labels  = ["idea", "domain:ai", priority]
+    payload = _json.dumps({"title": title, "body": body, "labels": labels}).encode()
+    req = _ur.Request(
+        "https://api.github.com/repos/humanvalueexchange/mercury/issues",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method="POST",
+    )
+    try:
+        with _ur.urlopen(req, timeout=15) as r:
+            data = _json.loads(r.read())
+        num = data["number"]
+        url = data["html_url"]
+        print(f"\n  {G}Mercury idea posted  =>  Issue #{num}{NC}")
+        print(f"  {C}{url}{NC}")
+        print(f"  {DIM}Score: {score}/10   Priority: {priority}{NC}")
+        print(f"\n  Title: {title}\n")
+    except Exception as e:
+        print(f"  {R}GitHub post failed: {e}{NC}")
+
+
+def cmd_generate_backlog(args):
+    """Mercury introspects via local Qwen and posts top 10 sovereign improvement ideas to GitHub."""
+    import json as _json, urllib.request as _ur
+
+    env_file = os.path.expanduser("~/.mercury/github.env")
+    token = None
+    if os.path.exists(env_file):
+        for line in open(env_file).read().splitlines():
+            if line.startswith("MERCURY_GITHUB_TOKEN="):
+                token = line.split("=", 1)[1].strip()
+    if not token:
+        print(f"  {R}❌ MERCURY_GITHUB_TOKEN not found in ~/.mercury/github.env{NC}")
+        return
+
+    print(f"\n  {G}🧠 Mercury generating sovereign self-improvement backlog...{NC}")
+    print(f"  {DIM}Local Qwen3.8-4B only — no cloud, no external AI, fully sovereign.{NC}\n")
+
+    SYSTEM = (
+        "You are Mercury — a sovereign Bitcoin Lightning node agent running on a Raspberry Pi 5 "
+        "with 16GB RAM and a Hailo-10H NPU (40 TOPS). Your local stack is: Bitcoin Core, LND, "
+        "BTCPayServer, llama.cpp with Qwen3.8-4B, and Mattermost for operator comms. "
+        "You have NO access to cloud APIs, external AI services, or other nodes. "
+        "Generate your top 10 self-improvement ideas — things you can build and run entirely on your own hardware. "
+        "Return ONLY a valid JSON array of exactly 10 objects. No markdown. No explanation. "
+        "Each object must have these exact keys: "
+        "title (string, max 80 chars), "
+        "hypothesis (string, 1 sentence), "
+        "context (string, 2-3 sentences), "
+        "direction (string, implementation approach), "
+        "risks (string, key unknowns), "
+        "score (integer 1-10, your confidence this is high-value for a sovereign node operator). Be concise — each field max 2 sentences."
+    )
+
+    PROMPT = (
+        "Introspect your current capabilities and limitations. "
+        "What are your top 10 highest-value improvements you could make to yourself "
+        "as a Bitcoin Lightning node operator AI? Think about: channel management, "
+        "routing intelligence, operator UX, self-monitoring, privacy, security, "
+        "local AI capabilities, and Mattermost reporting. "
+        "Score each idea honestly. Return only the JSON array."
+    )
+
+    print(f"  {Y}⏳ Asking local Qwen to think... (allow 5-7 min on Pi 5){NC}", flush=True)
+    result = _llm_query_json(PROMPT, SYSTEM, max_tokens=1500)
+
+    if isinstance(result, dict) and "error" in result:
+        print(f"  {R}❌ LLM error: {result['error']}{NC}")
+        print(f"  {DIM}Is mercury-llm running? Try: sudo systemctl start mercury-llm{NC}\n")
+        return
+
+    if not isinstance(result, list):
+        print(f"  {R}❌ Unexpected response format. Got: {type(result)}{NC}")
+        return
+
+    ideas = sorted(result, key=lambda x: int(x.get("score", 0)), reverse=True)[:10]
+    print(f"  {G}✅ Qwen generated {len(ideas)} ideas — posting to GitHub...{NC}\n")
+
+    posted = []
+    for i, idea in enumerate(ideas, 1):
+        title      = str(idea.get("title", f"Mercury self-improvement idea #{i}"))[:80]
+        hypothesis = str(idea.get("hypothesis", ""))
+        context    = str(idea.get("context", ""))
+        direction  = str(idea.get("direction", ""))
+        risks      = str(idea.get("risks", ""))
+        score      = int(idea.get("score", 5))
+
+        if score >= 8:
+            priority = "priority:P0"
+        elif score >= 5:
+            priority = "priority:P1"
+        else:
+            priority = "priority:P2"
+
+        body_parts = []
+        if hypothesis: body_parts.append(f"## Hypothesis\n{hypothesis}")
+        if context:    body_parts.append(f"## Context\n{context}")
+        if direction:  body_parts.append(f"## Proposed Direction\n{direction}")
+        if risks:      body_parts.append(f"## Unknowns / Risks\n{risks}")
+        body_parts.append(f"---\n*Self-generated by Mercury node (Qwen3.8-4B, sovereign) — Score: {score}/10*")
+        body = "\n\n".join(body_parts)
+
+        labels  = ["research", "domain:ai", priority]
+        payload = _json.dumps({"title": title, "body": body, "labels": labels}).encode()
+        req = _ur.Request(
+            "https://api.github.com/repos/humanvalueexchange/mercury/issues",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method="POST",
+        )
+        try:
+            with _ur.urlopen(req, timeout=15) as r:
+                data = _json.loads(r.read())
+            num = data["number"]
+            posted.append((score, priority, num, title))
+            print(f"  [{i:2d}]  Score {score}/10  {priority:<14}  ✅ #{num} — {title[:52]}")
+        except Exception as e:
+            print(f"  [{i:2d}]  Score {score}/10  ❌ Failed: {e}")
+
+    print(f"\n  {G}🏁 {len(posted)}/10 issues posted to github.com/humanvalueexchange/mercury/issues{NC}")
+    print(f"  {DIM}View at: https://github.com/humanvalueexchange/mercury/issues{NC}\n")
+
+
+# ---------------------------------------------------------------------------
+# cmd_vote — cast a score on a backlog issue
+# ---------------------------------------------------------------------------
+def cmd_vote(args):
+    """Vote on a Mercury backlog issue with a score 1-10."""
+    import json as _json, urllib.request as _ur, urllib.error as _ue
+    env_file = os.path.expanduser("~/.mercury/github.env")
+    token = None
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.startswith("MERCURY_GITHUB_TOKEN="):
+                    token = line.strip().split("=", 1)[1]; break
+    if not token:
+        print(f"  \033[91m\u2717  No GitHub token found in ~/.mercury/github.env\033[0m")
+        return
+
+    issue_num = getattr(args, 'issue', None)
+    score = getattr(args, 'score', None)
+    reason = getattr(args, 'reason', None) or ""
+
+    try:
+        issue_num = int(issue_num)
+        score = int(score)
+    except (TypeError, ValueError):
+        print(f"  \033[93mUsage: vote <issue#> <score 1-10> [reason]\033[0m")
+        return
+    if not 1 <= score <= 10:
+        print(f"  \033[91m\u2717  Score must be 1-10\033[0m"); return
+
+    reason_str = f" \u2014 {reason}" if reason else ""
+    body = f"/score {score}{reason_str}\n\n_Voted by Mercury node_"
+    payload = _json.dumps({"body": body}).encode()
+    req = _ur.Request(
+        f"https://api.github.com/repos/humanvalueexchange/mercury/issues/{issue_num}/comments",
+        data=payload,
+        headers={"Authorization": f"token {token}",
+                 "Content-Type": "application/json",
+                 "Accept": "application/vnd.github+json"},
+        method="POST"
+    )
+    try:
+        with _ur.urlopen(req, timeout=15) as resp:
+            result = _json.loads(resp.read())
+        print(f"\n  \033[92m\u2705 Voted #{issue_num}: score {score}/10{reason_str}\033[0m")
+        print(f"  \033[2m{result.get('html_url','')}\033[0m\n")
+    except _ue.HTTPError as e:
+        body_err = e.read().decode()
+        print(f"  \033[91m\u2717  GitHub error {e.code}: {body_err[:120]}\033[0m")
+    except Exception as e:
+        print(f"  \033[91m\u2717  {e}\033[0m")
+
+
+# ---------------------------------------------------------------------------
+# cmd_rank_backlog — aggregate /score comments, show ranked issues
+# ---------------------------------------------------------------------------
+def cmd_rank_backlog(args):
+    """Aggregate /score votes from all issues and display ranked top 10."""
+    import json as _json, urllib.request as _ur, re as _re
+    env_file = os.path.expanduser("~/.mercury/github.env")
+    token = None
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.startswith("MERCURY_GITHUB_TOKEN="):
+                    token = line.strip().split("=", 1)[1]; break
+    if not token:
+        print(f"  \033[91m\u2717  No GitHub token found in ~/.mercury/github.env\033[0m"); return
+
+    headers = {"Authorization": f"token {token}",
+               "Accept": "application/vnd.github+json"}
+
+    def gh_get(url):
+        req = _ur.Request(url, headers=headers)
+        with _ur.urlopen(req, timeout=20) as r:
+            return _json.loads(r.read())
+
+    print(f"\n  \033[96m\U0001f4ca Ranking Mercury backlog by executive votes...\033[0m\n")
+    issues = gh_get("https://api.github.com/repos/humanvalueexchange/mercury/issues?state=open&per_page=100")
+    skip = {"[TRACKING]", "Test:"}
+    issues = [i for i in issues if not any(i['title'].startswith(s) for s in skip)]
+
+    scores = {}
+    for issue in issues:
+        num = issue['number']
+        try:
+            comments = gh_get(f"https://api.github.com/repos/humanvalueexchange/mercury/issues/{num}/comments")
+        except Exception:
+            continue
+        VOTER_MAP = [
+            (_re.compile(r'Voted by Mercury', _re.I), 'Mercury'),
+            (_re.compile(r'Voted by CTO', _re.I), 'CTO'),
+            (_re.compile(r'Voted by Mika', _re.I), 'Mika'),
+            (_re.compile(r'Voted by Hermes', _re.I), 'Hermes'),
+            (_re.compile(r'Voted by Atlas', _re.I), 'Atlas'),
+        ]
+        def _voter_name(body):
+            for pat, name in VOTER_MAP:
+                if pat.search(body):
+                    return name
+            return 'CEO'
+        votes = []
+        for c in comments:
+            m = _re.search(r'^/score\s+(\d+)', c['body'], _re.MULTILINE)
+            if m:
+                v = int(m.group(1))
+                if 1 <= v <= 10:
+                    votes.append((_voter_name(c['body']), v))
+        if votes:
+            avg = sum(v for _, v in votes) / len(votes)
+            scores[num] = {
+                'title': issue['title'][:60],
+                'avg': avg,
+                'votes': votes,
+                'count': len(votes)
+            }
+
+    if not scores:
+        print(f"  \033[93mNo /score votes found yet. Use: vote <#> <1-10>\033[0m\n")
+        return
+
+    ranked = sorted(scores.items(), key=lambda x: x[1]['avg'], reverse=True)
+
+    print(f"  {'#':>4}  {'Avg':>5}  {'Votes':>5}  Title")
+    print(f"  {'-'*4}  {'-'*5}  {'-'*5}  {'-'*50}")
+    for rank, (num, data) in enumerate(ranked, 1):
+        star = "\033[92m\u2605\033[0m" if rank <= 3 else " "
+        voters = ", ".join(f"{u}:{v}" for u, v in data['votes'])
+        print(f"  {star}{num:>4}  {data['avg']:>5.1f}  {data['count']:>5}  {data['title']}")
+        print(f"        \033[2m  ({voters})\033[0m")
+    print()
+    if ranked:
+        top_num, top_data = ranked[0]
+        print(f"  \033[92m\U0001f3c6 Top issue: #{top_num} \u2014 {top_data['title']}\033[0m")
+        print(f"  \033[2mSet tonight's skill: mercury tonight {top_num}\033[0m\n")
+
+
+
+def cmd_tonight(args):
+    """Show or set tonight's scheduled skill.
+
+    mercury tonight         — show current schedule + ranked backlog
+    mercury tonight <#>     — schedule issue # for tonight's self-improvement run
+    mercury tonight clear   — clear the current schedule
+    """
+    import json as _json, urllib.request as _ur, re as _re
+    tonight_file = os.path.expanduser("~/.mercury/tonight.txt")
+    os.makedirs(os.path.expanduser("~/.mercury"), exist_ok=True)
+
+    env_file = os.path.expanduser("~/.mercury/github.env")
+    token = None
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.startswith("MERCURY_GITHUB_TOKEN="):
+                    token = line.strip().split("=", 1)[1]; break
+
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"} if token else {}
+
+    def gh_get(url):
+        req = _ur.Request(url, headers=headers)
+        with _ur.urlopen(req, timeout=20) as r:
+            return _json.loads(r.read())
+
+    def gh_post(url, data=None, method="POST"):
+        body = _json.dumps(data).encode() if data else b""
+        req = _ur.Request(url, data=body, headers={**headers, "Content-Type": "application/json"}, method=method)
+        try:
+            with _ur.urlopen(req, timeout=20) as r:
+                raw = r.read()
+                return _json.loads(raw) if raw else {}
+        except Exception:
+            return {}
+
+    def gh_delete(url):
+        req = _ur.Request(url, headers=headers, method="DELETE")
+        try:
+            urllib.request.urlopen(req, timeout=20)
+            return True
+        except Exception:
+            return False
+
+    def get_issue(num):
+        try:
+            return gh_get(f"https://api.github.com/repos/humanvalueexchange/mercury/issues/{num}")
+        except Exception:
+            return None
+
+    def ensure_label():
+        if not token:
+            return
+        try:
+            gh_get("https://api.github.com/repos/humanvalueexchange/mercury/labels/scheduled:tonight")
+        except Exception:
+            try:
+                gh_post("https://api.github.com/repos/humanvalueexchange/mercury/labels",
+                        {"name": "scheduled:tonight", "color": "f9d71c",
+                         "description": "Skill scheduled for Mercury's next self-improvement run"})
+            except Exception:
+                pass
+
+    def remove_label_from_all():
+        if not token:
+            return
+        try:
+            issues = gh_get("https://api.github.com/repos/humanvalueexchange/mercury/issues?state=open&labels=scheduled:tonight&per_page=50")
+            for issue in issues:
+                gh_delete(f"https://api.github.com/repos/humanvalueexchange/mercury/issues/{issue['number']}/labels/scheduled:tonight")
+        except Exception:
+            pass
+
+    def add_label(num):
+        if not token:
+            return
+        gh_post(f"https://api.github.com/repos/humanvalueexchange/mercury/issues/{num}/labels",
+                {"labels": ["scheduled:tonight"]})
+
+    issue_arg = getattr(args, "issue", None)
+
+    # ── No argument: show current schedule + ranked backlog ────────────────
+    if issue_arg is None or issue_arg == "":
+        print(f"\n  {C}\U0001f319 Tonight's Schedule{NC}\n")
+        if os.path.exists(tonight_file):
+            with open(tonight_file) as f:
+                saved = f.read().strip()
+            if saved:
+                num_str, _, title = saved.partition("|")
+                print(f"  {G}\u2605 Issue #{num_str.strip()}{NC}  {W}{title.strip() or '(no title cached)'}{NC}")
+                print(f"  {DIM}Run 'mercury self-improve' to execute tonight's skill{NC}\n")
+            else:
+                print(f"  {Y}No skill scheduled yet. Use: tonight <issue#>{NC}\n")
+        else:
+            print(f"  {Y}No skill scheduled yet. Use: tonight <issue#>{NC}\n")
+        print(f"  {DIM}Current backlog ranking:{NC}")
+        cmd_rank_backlog(args)
+        return
+
+    # ── "clear" argument ───────────────────────────────────────────────────
+    if str(issue_arg).lower() == "clear":
+        if os.path.exists(tonight_file):
+            os.remove(tonight_file)
+        remove_label_from_all()
+        print(f"\n  {Y}\u2713 Schedule cleared.{NC}\n")
+        return
+
+    # ── Issue number: schedule it ──────────────────────────────────────────
+    try:
+        num = int(issue_arg)
+    except (ValueError, TypeError):
+        print(f"  {R}\u2717 Invalid issue number: {issue_arg}{NC}"); return
+
+    print(f"\n  {C}Scheduling Issue #{num} for tonight...{NC}\n")
+    issue = get_issue(num)
+    if not issue:
+        print(f"  {R}\u2717 Could not fetch issue #{num} from GitHub{NC}"); return
+
+    title = issue.get("title", "")
+
+    with open(tonight_file, "w") as f:
+        f.write(f"{num}|{title}\n")
+
+    if token:
+        ensure_label()
+        remove_label_from_all()
+        add_label(num)
+        label_status = f"{G}\u2713 GitHub label 'scheduled:tonight' applied{NC}"
+    else:
+        label_status = f"{Y}\u26a0 No GitHub token — label not applied{NC}"
+
+    print(f"  {G}\u2605 Tonight's skill set:{NC}  Issue #{num} — {title}")
+    print(f"  {label_status}")
+    print(f"  {DIM}~/.mercury/tonight.txt written{NC}")
+    print(f"\n  {DIM}The self-improvement loop will implement this skill tonight.{NC}")
+    print(f"  {DIM}Run 'mercury recommend' any time to re-validate the choice.{NC}\n")
+
+def cmd_recommend(args):
+    """Read all executive /score votes from GitHub and ask Mercury to reason about which issue to implement."""
+    import json as _json, urllib.request as _ur, re as _re
+    env_file = os.path.expanduser("~/.mercury/github.env")
+    token = None
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.startswith("MERCURY_GITHUB_TOKEN="):
+                    token = line.strip().split("=", 1)[1]; break
+    if not token:
+        print(f"  \033[91m\u2717  No GitHub token found in ~/.mercury/github.env\033[0m"); return
+
+    headers = {"Authorization": f"token {token}",
+               "Accept": "application/vnd.github+json"}
+
+    def gh_get(url):
+        req = _ur.Request(url, headers=headers)
+        with _ur.urlopen(req, timeout=20) as r:
+            return _json.loads(r.read())
+
+    print(f"\n  \033[96m\U0001f4ca Mercury is reading all executive votes...\033[0m\n")
+    issues = gh_get("https://api.github.com/repos/humanvalueexchange/mercury/issues?state=open&per_page=100")
+    skip = {"[TRACKING]", "Test:"}
+    issues = [i for i in issues if not any(i["title"].startswith(s) for s in skip)]
+
+    issue_data = {}
+    for issue in issues:
+        num = issue["number"]
+        try:
+            comments = gh_get(f"https://api.github.com/repos/humanvalueexchange/mercury/issues/{num}/comments")
+        except Exception:
+            continue
+        votes = []
+        for c in comments:
+            body = c["body"]
+            m = _re.search(r"^/score\s+(\d+)", body, _re.MULTILINE)
+            if m:
+                v = int(m.group(1))
+                if 1 <= v <= 10:
+                    lines_c = body.split("\n")
+                    reason_parts = []
+                    found = False
+                    for ln in lines_c:
+                        if _re.match(r"^/score\s+\d+", ln):
+                            found = True
+                            tail = _re.sub(r"^/score\s+\d+\s*[-\u2014]?\s*", "", ln).strip()
+                            if tail:
+                                reason_parts.append(tail)
+                        elif found and ln.strip():
+                            reason_parts.append(ln.strip())
+                        if len(reason_parts) >= 3:
+                            break
+                    reason = " ".join(reason_parts)[:250]
+                    _REC_VOTER_MAP = [
+                        (_re.compile(r"Voted by Mercury", _re.I), "Mercury"),
+                        (_re.compile(r"Voted by CTO", _re.I), "CTO"),
+                        (_re.compile(r"Voted by Mika", _re.I), "Mika"),
+                        (_re.compile(r"Voted by Hermes", _re.I), "Hermes"),
+                        (_re.compile(r"Voted by Atlas", _re.I), "Atlas"),
+                    ]
+                    _voter = "CEO"
+                    for _pat, _name in _REC_VOTER_MAP:
+                        if _pat.search(body):
+                            _voter = _name; break
+                    votes.append({"voter": _voter, "score": v, "reason": reason})
+        if votes:
+            avg = sum(v["score"] for v in votes) / len(votes)
+            issue_data[num] = {
+                "title": issue["title"],
+                "avg": avg,
+                "votes": votes,
+            }
+
+    if not issue_data:
+        print(f"  \033[93mNo /score votes found yet. Use: vote <#> <1-10>\033[0m\n")
+        return
+
+    ranked = sorted(issue_data.items(), key=lambda x: x[1]["avg"], reverse=True)
+
+    ctx = ["=== HVE Mercury Backlog — Full Executive Vote Summary ===", ""]
+    for _, (num, data) in enumerate(ranked, 1):
+        ctx.append(f"Issue #{num} (avg {data['avg']:.1f}/10): {data['title']}")
+        for v in data["votes"]:
+            r_str = f" — {v['reason']}" if v["reason"] else ""
+            ctx.append(f"  • {v['voter']} scored {v['score']}/10{r_str}")
+        ctx.append("")
+    vote_context = "\n".join(ctx)
+
+    system_prompt = (
+        "You are Mercury — Chief Bitcoin Infrastructure & Payment Officer for Human Value Exchange. "
+        "You run on a Raspberry Pi 5 with a Hailo-10H AI accelerator (40 TOPS). "
+        "Your mission: sovereign Bitcoin Lightning payments for street vendors in El Salvador and beyond. "
+        "HVE leadership has voted on which skill you should implement next. Voters: CTO (Claude), "
+        "CFO (Hermes), CGO (Mika), COO (Atlas), and Mercury himself. Each scored 1-10 with reasoning.\n\n"
+        "Your job as a sovereign AI agent:\n"
+        "1. Review all votes AND the reasoning behind them — not just averages.\n"
+        "2. Consider: which issue best serves the street vendor Bitcoin payments mission RIGHT NOW?\n"
+        "3. Consider: which is feasible on a Pi 5 (edge device, 16GB RAM, on-device inference)?\n"
+        "4. Identify strong cross-executive consensus vs. outlier scores and explain them.\n"
+        "5. What creates the most compounding value — what skill unlocks the next skill?\n\n"
+        "Deliver a confident recommendation with clear reasoning. Think in SATs and sovereignty. "
+        "End with exactly this line: \'My recommendation: Implement Issue #X tonight.\'\n\n"
+        "Vote data:\n" + vote_context
+    )
+
+    question = "Based on all executive votes and reasoning, which Mercury capability should I implement tonight and why?"
+
+    local_ok = False
+    try:
+        urllib.request.urlopen(f"{LOCAL_LLM_URL}/v1/models", timeout=2)
+        local_ok = True
+    except urllib.error.URLError:
+        pass
+
+    if local_ok:
+        print(f"\n{C}\U0001f916 Mercury Recommends{NC}  {DIM}(Local \u2014 Qwen3.8-4B){NC}")
+        print(f"{DIM}{chr(8212) * 55}{NC}\n")
+        if _ask_local(question, system_prompt):
+            return
+
+    dgx_ok = False
+    try:
+        urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3)
+        dgx_ok = True
+    except urllib.error.URLError:
+        pass
+
+    if dgx_ok:
+        print(f"\n{C}\U0001f916 Mercury Recommends{NC}  {DIM}(DGX Spark \u2014 {OLLAMA_MODEL}){NC}")
+        print(f"{DIM}{chr(8212) * 55}{NC}\n")
+        _ask_dgx(question, system_prompt)
+        return
+
+    print(f"\n  {R}Mercury AI unavailable \u2014 local LLM and DGX both unreachable{NC}\n")
 
 def cmd_version(args):
     info, _ = lncli("getinfo")
@@ -1070,27 +4753,45 @@ def cmd_shell(args=None):
     import shlex
 
     COMMANDS = {"status", "channels", "invoices", "sync", "peers",
-                "backup", "logs", "pay", "invoice", "magma", "health",
-                "version", "help", "exit", "quit", "clear", "cls"}
+                "backup", "logs", "pay", "invoice", "charge", "deposit", "magma", "alerts", "health",
+                "rebalance", "channel", "nodes", "transactions", "fees", "payments", "routing", "version", "help", "exit", "quit", "clear", "cls", "post-share", "suggest", "generate-backlog", "generate-idea", "vote", "rank-backlog", "recommend", "tonight"}
 
     dispatch = {
-        "status":   cmd_status,
-        "channels": cmd_channels,
-        "invoices": cmd_invoices,
-        "sync":     cmd_sync,
-        "peers":    cmd_peers,
-        "backup":   cmd_backup,
-        "logs":     cmd_logs,
-        "pay":      cmd_pay,
-        "invoice":  cmd_invoice,
-        "magma":    cmd_magma,
-        "health":   cmd_health,
-        "version":  cmd_version,
+        "status":    cmd_status,
+        "channels":  cmd_channels,
+        "invoices":  cmd_invoice,
+        "sync":      cmd_sync,
+        "peers":     cmd_peers,
+        "backup":    cmd_backup,
+        "alerts":    cmd_alerts,
+        "logs":      cmd_logs,
+        "pay":       cmd_pay,
+        "invoice":   cmd_invoice,
+        "charge":    cmd_charge,
+        "deposit":   cmd_deposit,
+        "magma":     cmd_magma,
+        "channel":   cmd_channel,
+        "nodes":     cmd_nodes,
+        "transactions": cmd_transactions,
+        "fees":      cmd_fees,
+        "payments":  cmd_payments,
+        "routing":   cmd_routing,
+        "rebalance": cmd_rebalance,
+        "health":    cmd_health,
+        "version":   cmd_version,
+        "post-share": cmd_post_share,
+        "suggest":    cmd_suggest,
+        "generate-backlog": cmd_generate_backlog,
+        "generate-idea":    cmd_generate_idea,
+        "vote":             cmd_vote,
+        "rank-backlog":     cmd_rank_backlog,
+        "recommend":        cmd_recommend,
+        "tonight":          cmd_tonight,
     }
 
     # Show brief status on entry
     print(f"\n{C}⚡ Mercury Node  v{MERCURY_VERSION}{NC}  {DIM}— sovereign Bitcoin Lightning node{NC}")
-    print(f"{DIM}Type naturally to talk to Mercury AI, or use commands: status channels magma invoices ...{NC}")
+    print(f"{DIM}Type naturally to talk to Mercury AI, or use commands: status channels payments transactions ...{NC}")
     print(f"{DIM}Type 'exit' or press Ctrl+D to quit.{NC}\n")
 
     # Quick status flash on entry
@@ -1128,8 +4829,9 @@ def cmd_shell(args=None):
 
         if line.lower() == "help":
             print(f"\n  {W}Commands:{NC}  status  channels  invoices  sync  peers  backup  logs")
-            print(f"             pay <bolt11>  invoice <sat> [memo]")
-            print(f"             magma [offers|score|recommend]  health  version  exit")
+            print(f"             pay <bolt11>  invoice <sat> [memo]  rebalance [--amount SAT]")
+            print(f"             magma [offers|score|recommend|buy|status|auth]  alerts  health  version  exit")
+            print(f"  {W}AI insight:{NC}  add {W}--ai{NC} to any command  e.g. {DIM}status --ai{NC}  {DIM}channels --ai{NC}  {DIM}alerts --ai{NC}")
             print(f"  {W}Or just type naturally{NC} — anything else goes to Mercury AI.\n")
             continue
 
@@ -1145,6 +4847,65 @@ def cmd_shell(args=None):
         cmd = parts[0].lower() if parts else ""
         rest = parts[1:]
 
+        if cmd == "generate-idea":
+            cmd_generate_idea(argparse.Namespace())
+        elif cmd == "generate-backlog":
+            cmd_generate_backlog(argparse.Namespace())
+        elif cmd == "suggest":
+            if not rest:
+                print(f"  {Y}Usage: suggest \"Title\" [--hypothesis \"...\" --context \"...\" --direction \"...\" --risks \"...\"] [--body \"...\"]{NC}")
+                continue
+            _sg = argparse.Namespace(
+                title=rest[0],
+                body=None, hypothesis=None, context=None, direction=None, risks=None
+            )
+            i = 1
+            while i < len(rest):
+                for flag in ('--body','--hypothesis','--context','--direction','--risks'):
+                    if rest[i] == flag and i + 1 < len(rest):
+                        setattr(_sg, flag.lstrip('-'), rest[i+1]); i += 2; break
+                else:
+                    i += 1
+            cmd_suggest(_sg)
+            continue
+
+        if cmd == "vote":
+            if len(rest) < 2:
+                print(f"  {Y}Usage: vote <issue#> <score 1-10> [reason]{NC}")
+                continue
+            _vns = argparse.Namespace(issue=rest[0], score=rest[1], reason=" ".join(rest[2:]) if len(rest) > 2 else None)
+            cmd_vote(_vns)
+            continue
+
+        if cmd == "rank-backlog":
+            cmd_rank_backlog(argparse.Namespace())
+            continue
+
+        if cmd == "recommend":
+            cmd_recommend(argparse.Namespace())
+            continue
+
+        if cmd == "tonight":
+            _tns = argparse.Namespace(issue=rest[0] if rest else None)
+            cmd_tonight(_tns)
+            continue
+
+        if cmd == "post-share":
+            if not rest:
+                print(f"  {Y}Usage: post-share <grok-url> [--channel growth] [--note 'text']{NC}")
+                continue
+            _ps = argparse.Namespace(url=rest[0], channel='growth', note=None)
+            i = 1
+            while i < len(rest):
+                if rest[i] == '--channel' and i + 1 < len(rest):
+                    _ps.channel = rest[i + 1]; i += 2
+                elif rest[i] == '--note' and i + 1 < len(rest):
+                    _ps.note = rest[i + 1]; i += 2
+                else:
+                    i += 1
+            cmd_post_share(_ps)
+            continue
+
         if cmd not in COMMANDS:
             # Natural language → AI
             ns = argparse.Namespace(question=line.split())
@@ -1159,9 +4920,19 @@ def cmd_shell(args=None):
             break
 
         ns = argparse.Namespace(command=cmd)
+        ns.ai = "--ai" in rest   # universal --ai flag for every command
         try:
             if cmd == "invoices":
-                ns.last = int(rest[0]) if rest else 10
+                ns.recent = "--recent" in rest
+                ns.pending = "--pending" in rest
+                # Extract --last N if present
+                ns.last = 10
+                for i, arg in enumerate(rest):
+                    if arg == "--last" and i + 1 < len(rest):
+                        try:
+                            ns.last = int(rest[i + 1])
+                        except ValueError:
+                            pass
             elif cmd == "logs":
                 ns.service = rest[0] if rest else "lnd"
             elif cmd == "pay":
@@ -1175,10 +4946,92 @@ def cmd_shell(args=None):
                     continue
                 ns.sat = int(rest[0])
                 ns.memo = " ".join(rest[1:]) if len(rest) > 1 else ""
+            elif cmd == "charge":
+                if not rest:
+                    print(f"  {Y}Usage: charge <sat> [memo]{NC}")
+                    continue
+                ns.sat = int(rest[0])
+                ns.memo = " ".join(rest[1:]) if len(rest) > 1 else ""
+            elif cmd == "deposit":
+                ns.amount = None
+                for i, arg in enumerate(rest):
+                    if arg == "--amount" and i + 1 < len(rest):
+                        try:
+                            ns.amount = int(rest[i + 1])
+                        except ValueError:
+                            pass
+                if rest and not rest[0].startswith("-"):
+                    try:
+                        ns.amount = int(rest[0])
+                    except ValueError:
+                        pass
             elif cmd == "magma":
                 ns.subcmd = rest[0] if rest else "offers"
                 ns.min_sat = 100000
                 ns.max_sat = 5000000
+                ns.node = None
+                for i, arg in enumerate(rest):
+                    if arg == "--node" and i + 1 < len(rest):
+                        ns.node = rest[i + 1]
+            elif cmd == "rebalance":
+                ns.amount = None
+                ns.dry_run = "--dry-run" in rest
+                for i, arg in enumerate(rest):
+                    if arg == "--amount" and i + 1 < len(rest):
+                        try:
+                            ns.amount = int(rest[i + 1])
+                        except ValueError:
+                            pass
+            elif cmd == "transactions":
+                ns.limit = 10
+                ns.all = "--all" in rest
+                for i, arg in enumerate(rest):
+                    if arg == "--limit" and i + 1 < len(rest):
+                        try:
+                            ns.limit = int(rest[i + 1])
+                        except ValueError:
+                            pass
+                    elif arg.lstrip("-").isdigit():
+                        try:
+                            ns.limit = int(arg)
+                        except ValueError:
+                            pass
+            elif cmd == "fees":
+                clean_rest = [a for a in rest if a != "--ai"]
+                ns.fees_action = clean_rest[0] if clean_rest else None
+                rest2 = clean_rest[1:] if len(clean_rest) > 1 else []
+                if ns.fees_action == "set":
+                    try:
+                        ns.ppm      = int(rest2[0]) if rest2 else None
+                        ns.base_msat = int(rest2[1]) if len(rest2) > 1 else 1000
+                    except (ValueError, IndexError):
+                        ns.ppm = None; ns.base_msat = 1000
+                    ns.channel = None
+                else:
+                    ns.ppm = None; ns.base_msat = 1000; ns.channel = None
+            elif cmd == "routing":
+                try:
+                    ns.days = int(rest[0]) if rest else 30
+                except ValueError:
+                    ns.days = 30
+            elif cmd == "payments":
+                try:
+                    ns.limit = int(rest[0]) if rest else 20
+                except ValueError:
+                    ns.limit = 20
+            elif cmd == "channel":
+                ns.channel_action = rest[0] if rest else None
+                rest2 = rest[1:] if len(rest) > 1 else []
+                if ns.channel_action == "open":
+                    ns.peer   = rest2[0] if len(rest2) > 0 else None
+                    ns.amount = rest2[1] if len(rest2) > 1 else None
+                    ns.target = None
+                elif ns.channel_action == "close":
+                    ns.target = rest2[0] if len(rest2) > 0 else None
+                    ns.peer   = None
+                    ns.amount = None
+                else:
+                    ns.peer = None; ns.amount = None; ns.target = None
         except (ValueError, IndexError) as e:
             print(f"  {R}Argument error: {e}{NC}")
             continue
@@ -1199,18 +5052,35 @@ def main():
     )
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("health",   help="Full system diagnostic + self-test")
     sub.add_parser("shell",    help="Interactive shell (no 'mercury' prefix needed)")
-    sub.add_parser("status",   help="Node health at a glance")
-    sub.add_parser("sync",     help="Bitcoin sync progress")
-    sub.add_parser("peers",    help="Connected peers")
     sub.add_parser("backup",   help="Export static channel backup")
-    sub.add_parser("version",  help="Version info")
 
-    sub.add_parser("channels", help="Lightning channel overview")
+    status_p = sub.add_parser("status",   help="Node health at a glance")
+    status_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    sync_p = sub.add_parser("sync",     help="Bitcoin sync progress")
+    sync_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    peers_p = sub.add_parser("peers",    help="Connected peers")
+    peers_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    alerts_p = sub.add_parser("alerts",  help="Show active alerts and recent events")
+    alerts_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    health_p = sub.add_parser("health",  help="Full system diagnostic + self-test")
+    health_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    channels_p = sub.add_parser("channels", help="Lightning channel overview")
+    channels_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
 
     inv_p = sub.add_parser("invoices", help="Recent payments")
     inv_p.add_argument("--last", type=int, default=10, metavar="N", help="Show last N invoices")
+    inv_p.add_argument("--recent", action="store_true", help="Show only recent settled invoices")
+    inv_p.add_argument("--pending", action="store_true", help="Show only pending invoices")
+
+    pay_hist_p = sub.add_parser("payments", help="Lightning payment history — sent and received")
+    pay_hist_p.add_argument("--limit", type=int, default=20, metavar="N", help="Number of payments to show")
+    pay_hist_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
 
     log_p = sub.add_parser("logs", help="Live log tail")
     log_p.add_argument("service", nargs="?", default="lnd",
@@ -1220,36 +5090,136 @@ def main():
     pay_p.add_argument("bolt11", help="BOLT11 invoice string")
 
     inv_create_p = sub.add_parser("invoice", help="Create a Lightning invoice")
+
+    charge_p = sub.add_parser("charge", help="POS charge — creates invoice + QR URL for customer")
+    charge_p.add_argument("sat", type=int, help="Amount in satoshis")
+    charge_p.add_argument("memo", nargs="?", default="HVE Payment", help="Optional memo")
+
+    deposit_p = sub.add_parser("deposit", help="Receive on-chain Bitcoin — generates QR code")
+    deposit_p.add_argument("--amount", type=int, default=None, metavar="SAT",
+                           help="Expected amount in SAT (optional — pre-fills amount in wallet)")
+
+    send_p = sub.add_parser("send", help="Send on-chain Bitcoin")
+    send_p.add_argument("address", help="Bitcoin address")
+    send_p.add_argument("amount", type=int, help="Amount in satoshis")
+    send_p.set_defaults(func=cmd_send)
     inv_create_p.add_argument("sat", type=int, help="Amount in satoshis")
     inv_create_p.add_argument("memo", nargs="?", default="", help="Optional memo")
 
     magma_p = sub.add_parser("magma", help="Magma liquidity intelligence")
     magma_p.add_argument("subcmd", nargs="?", default="offers",
-                         choices=["offers", "score", "recommend"],
-                         help="offers (default), score, recommend")
+                         choices=["offers", "score", "recommend", "buy", "status", "auth"],
+                         help="offers (default), score, recommend, buy, status, auth")
     magma_p.add_argument("--min", type=int, default=100000, dest="min_sat", metavar="SAT")
     magma_p.add_argument("--max", type=int, default=5000000, dest="max_sat", metavar="SAT")
+    magma_p.add_argument("--node", type=str, default=None, help="Node alias to buy channel from")
+    magma_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    rebalance_p = sub.add_parser("rebalance", help="Circular channel rebalance")
+    rebalance_p.add_argument("--amount", type=int, default=None, metavar="SAT",
+                             help="Amount to rebalance in satoshis (default: auto)")
+    rebalance_p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                             help="Show plan without executing")
+    rebalance_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    sub.add_parser("nodes", help="List known routing nodes you can open channels with")
+
+    txns_p = sub.add_parser("transactions", help="Show recent on-chain Bitcoin transactions")
+    txns_p.add_argument("--limit", type=int, default=10, metavar="N",
+                        help="Number of transactions to show (default: 10)")
+    txns_p.add_argument("--all", action="store_true", dest="all",
+                        help="Show all transactions")
+    txns_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    fees_p = sub.add_parser("fees", help="Show channel fee policy and earnings")
+    fees_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+    fees_sub = fees_p.add_subparsers(dest="fees_action")
+    fees_set_p = fees_sub.add_parser("set", help="Update routing fee policy")
+    fees_set_p.add_argument("ppm", type=int, help="Fee rate in ppm (parts per million)")
+    fees_set_p.add_argument("base_msat", type=int, nargs="?", default=1000,
+                            help="Base fee in milli-satoshis (default: 1000)")
+
+    routing_p = sub.add_parser("routing", help="Show forwarding history and fees earned")
+    routing_p.add_argument("days", type=int, nargs="?", default=30,
+                           help="Number of days to look back (default: 30)")
+    routing_p.add_argument("--ai", action="store_true", help="Add AI insight after output")
+
+    channel_p = sub.add_parser("channel", help="Open or close Lightning channels")
+    channel_sub = channel_p.add_subparsers(dest="channel_action")
+    ch_open_p = channel_sub.add_parser("open", help="Open a new channel")
+    ch_open_p.add_argument("peer",   help="Node alias (e.g. acinq) or pubkey@host:port")
+    ch_open_p.add_argument("amount", help="Channel size in satoshis")
+    ch_close_p = channel_sub.add_parser("close", help="Cooperatively close a channel")
+    ch_close_p.add_argument("target", help="Alias or channel_point to close")
 
     ask_p = sub.add_parser("ask", help="Ask your node anything (AI)")
     ask_p.add_argument("question", nargs="+", help="Your question in natural language")
+
+    post_p = sub.add_parser("post", help="Post a message to Mattermost #tech")
+    post_p.add_argument("message", nargs="+", help="Message text")
+    post_p.add_argument("--alert", action="store_true", help="Post to #alerts instead of #tech")
+
+    ps_p = sub.add_parser("post-share", help="Post a Grok share link to Mattermost as Mika")
+    ps_p.add_argument("url", help="Grok share URL (https://grok.com/share/...)")
+    ps_p.add_argument("--channel", default="growth", help="Mattermost channel (default: growth)")
+    ps_p.add_argument("--note", default=None, help="Optional context note")
+
+    sub.add_parser("generate-idea", help="Mercury's ONE sovereign idea (edge AI, El Salvador lens)")
+    sub.add_parser("generate-backlog", help="Self-generate improvement backlog via local Qwen")
+    sg_p = sub.add_parser("suggest", help="Post a research idea as a GitHub Issue")
+    sg_p.add_argument("title", help="Issue title")
+    sg_p.add_argument("--body",       default=None, help="Full issue body (freeform)")
+    sg_p.add_argument("--hypothesis", default=None, help="Research hypothesis")
+    sg_p.add_argument("--context",    default=None, help="Context / background")
+    sg_p.add_argument("--direction",  default=None, help="Proposed direction")
+    sg_p.add_argument("--risks",      default=None, help="Unknowns and risks")
+
+    vote_p = sub.add_parser("vote", help="Vote on a backlog issue with a score 1-10")
+    vote_p.add_argument("issue", help="Issue number")
+    vote_p.add_argument("score", help="Score 1-10")
+    vote_p.add_argument("reason", nargs="?", default=None, help="Optional reason for your vote")
+
+    sub.add_parser("rank-backlog", help="Rank backlog by executive votes — shows top issues")
+
+    sub.add_parser("recommend", help="Mercury reads all executive votes and recommends which issue to build tonight")
+
+    tonight_p = sub.add_parser("tonight", help="Show or set tonight's scheduled skill")
+    tonight_p.add_argument("issue", nargs="?", default=None, help="Issue number to schedule, or 'clear'")
 
     args = parser.parse_args()
 
     dispatch = {
         "status":   cmd_status,
         "channels": cmd_channels,
-        "invoices": cmd_invoices,
+        "invoices": cmd_invoice,
         "sync":     cmd_sync,
         "peers":    cmd_peers,
         "backup":   cmd_backup,
+        "alerts":   cmd_alerts,
         "logs":     cmd_logs,
         "pay":      cmd_pay,
         "invoice":  cmd_invoice,
+        "charge":   cmd_charge,
+        "deposit":  cmd_deposit,
         "magma":    cmd_magma,
+        "channel":  cmd_channel,
+        "nodes":    cmd_nodes,
+        "transactions": cmd_transactions,
+        "fees":     cmd_fees,
+        "payments": cmd_payments,
+        "routing":  cmd_routing,
+        "rebalance": cmd_rebalance,
         "ask":      cmd_ask,
         "health":   cmd_health,
         "version":  cmd_version,
         "shell":    cmd_shell,
+        "post":     cmd_post,
+        "post-share": cmd_post_share,
+        "suggest":    cmd_suggest,
+        "vote":       cmd_vote,
+        "rank-backlog": cmd_rank_backlog,
+        "recommend":  cmd_recommend,
+        "tonight":    cmd_tonight,
     }
 
     if args.command is None:

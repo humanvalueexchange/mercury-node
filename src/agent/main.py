@@ -1,5 +1,5 @@
 """
-Mercury Agent — v0.5
+Mercury Agent — v0.5.2
 FastAPI service exposing Mercury node status + Magma liquidity intelligence for the AI agent layer.
 
 Endpoints:
@@ -12,10 +12,14 @@ Endpoints:
   GET  /api/magma/offers      Live Magma inbound liquidity offers
   GET  /api/magma/node-score  Our node's Amboss health/reputation score
   GET  /api/magma/recommend   AI-powered channel recommendations for our pubkey
+  POST /api/magma/buy         Initiate Magma channel purchase (requires API key)
+  GET  /api/routing           Forwarding history — payments routed + fees earned
+  GET  /api/payments          Lightning payment history — sent + received unified
+  GET  /api/magma/orders      List all Magma orders placed from this node
   GET  /health                Liveness check (for systemd / load balancer)
 
 This service runs as user 'lnd' so it can read LND macaroons.
-Node operations are READ-ONLY — it never signs transactions or moves funds.
+Node operations: reads are anonymous. /api/magma/buy requires MAGMA_API_KEY.
 Magma read access is anonymous — no API key required to start.
 """
 
@@ -39,8 +43,9 @@ MAGMA_GRAPHQL = "https://magma.amboss.tech/graphql"
 MAGMA_API_KEY = os.getenv("MAGMA_API_KEY", "")  # optional — anonymous access works without it
 LND_DIR = "/var/lib/lnd"
 LND_USER = "lnd"
-BACKUP_DIR = "/var/lib/lnd/backups"
+BACKUP_DIR = "/var/lib/mercury/backups"
 BACKUP_TOKEN = os.getenv("MERCURY_BACKUP_TOKEN", "")
+ORDERS_FILE = "/var/lib/mercury/magma_orders.json"
 AGENT_VERSION = "0.5.5"
 
 app = FastAPI(
@@ -55,6 +60,25 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=[],
 )
+
+# ── Request models ────────────────────────────────────────────────────────────
+
+try:
+    from pydantic import BaseModel
+
+    class MagmaBuyRequest(BaseModel):
+        offer_id: str
+        size_sat: float = 0.0
+        api_key: str = ""
+
+except ImportError:
+    # Pydantic not available — define a minimal shim
+    class MagmaBuyRequest:  # type: ignore
+        def __init__(self, offer_id: str, size_sat: float = 0.0, api_key: str = ""):
+            self.offer_id = offer_id
+            self.size_sat = size_sat
+            self.api_key = api_key
+
 
 # ── LND wrapper ───────────────────────────────────────────────────────────────
 
@@ -120,8 +144,6 @@ def get_status():
         "nginx":      systemctl_active("nginx"),
     }
 
-    # LND listchannels returns this node's open channels; describegraph is the
-    # public gossip graph and is not used for local balance accounting.
     active_channels = channel_data.get("channels", [])
     active_count = int(info.get("num_active_channels", 0))
     open_count = len(active_channels)
@@ -284,6 +306,126 @@ def trigger_backup(x_mercury_backup_token: Optional[str] = Header(default=None))
     return {"status": "ok", "path": path, "ts": ts}
 
 
+@app.get("/api/routing")
+def get_routing_history(limit: int = 50, days: int = 30):
+    """
+    Return forwarding history (routing events) from LND.
+    Shows payments we routed for other nodes, fees earned per hop.
+    """
+    # Build time window: start_time = now - days
+    start_ts = int(time.time()) - (days * 86400)
+    data = lncli(
+        "fwdinghistory",
+        f"--start_time={start_ts}",
+        f"--max_events={limit}",
+        "--index_offset=0",
+    )
+    events = data.get("forwarding_events", [])
+
+    # Build chan_id → alias map from active channels
+    try:
+        ch_data = lncli("listchannels")
+        chan_map = {}
+        for ch in ch_data.get("channels", []):
+            cid = ch.get("chan_id", "")
+            pk  = ch.get("remote_pubkey", "")
+            # We'll resolve alias via peers later; use pubkey prefix for now
+            chan_map[cid] = pk[:16] + "..."
+    except Exception:
+        chan_map = {}
+
+    result = []
+    total_fees_msat = 0
+    for e in events:
+        amt_in   = int(e.get("amt_in", 0))
+        amt_out  = int(e.get("amt_out", 0))
+        fee_msat = int(e.get("fee_msat", 0))
+        ts       = int(e.get("timestamp", 0))
+        chan_in   = e.get("chan_id_in", "")
+        chan_out  = e.get("chan_id_out", "")
+        total_fees_msat += fee_msat
+        result.append({
+            "timestamp":    ts,
+            "amt_in_sat":   amt_in,
+            "amt_out_sat":  amt_out,
+            "fee_msat":     fee_msat,
+            "fee_sat":      round(fee_msat / 1000, 3),
+            "chan_in":       chan_map.get(chan_in, chan_in[-8:] if len(chan_in) > 8 else chan_in),
+            "chan_out":      chan_map.get(chan_out, chan_out[-8:] if len(chan_out) > 8 else chan_out),
+        })
+
+    # Most recent first
+    result.sort(key=lambda x: x["timestamp"], reverse=True)
+
+    return {
+        "events":           result,
+        "total":            len(result),
+        "total_fees_sat":   round(total_fees_msat / 1000, 3),
+        "days":             days,
+    }
+
+
+@app.get("/api/payments")
+def get_payments(limit: int = 50):
+    """
+    Return unified Lightning payment history — sent + received.
+    Sent:     lncli listpayments (SUCCEEDED)
+    Received: lncli listinvoices (SETTLED)
+    Returns combined timeline sorted newest-first.
+    """
+    result = []
+
+    # Sent payments
+    try:
+        pay_data = lncli("listpayments", f"--max_payments={limit}", "--include_incomplete=false")
+        for p in pay_data.get("payments", []):
+            if p.get("status") != "SUCCEEDED":
+                continue
+            ts_ns  = int(p.get("creation_time_ns", 0))
+            ts     = ts_ns // 1_000_000_000
+            amt    = int(p.get("value_sat", 0))
+            fee    = int(p.get("fee_sat", 0))
+            memo   = ""
+            req    = p.get("payment_request", "")
+            result.append({
+                "direction":  "sent",
+                "amount_sat": amt,
+                "fee_sat":    fee,
+                "memo":       memo,
+                "timestamp":  ts,
+                "status":     "succeeded",
+                "payment_hash": p.get("payment_hash", "")[:16],
+            })
+    except Exception:
+        pass
+
+    # Received payments (settled invoices)
+    try:
+        inv_data = lncli("listinvoices", f"--num_max_invoices={limit}", "--reversed=true")
+        for inv in inv_data.get("invoices", []):
+            if inv.get("state") != "SETTLED":
+                continue
+            settle_ts = int(inv.get("settle_date", 0))
+            amt       = int(inv.get("amt_paid_sat", inv.get("value", 0)))
+            memo      = inv.get("memo", "")
+            # Skip internal rebalance invoices
+            if memo == "mercury-rebalance":
+                continue
+            result.append({
+                "direction":  "received",
+                "amount_sat": amt,
+                "fee_sat":    0,
+                "memo":       memo,
+                "timestamp":  settle_ts,
+                "status":     "settled",
+                "payment_hash": inv.get("r_hash", "")[:16],
+            })
+    except Exception:
+        pass
+
+    result.sort(key=lambda x: x["timestamp"], reverse=True)
+    return {"payments": result[:limit], "total": len(result)}
+
 
 # ── Magma helpers ─────────────────────────────────────────────────────────────
 
@@ -292,8 +434,6 @@ async def magma_query(query: str, variables: dict = None):
     headers = {"Content-Type": "application/json"}
     if MAGMA_API_KEY:
         headers["Authorization"] = f"Bearer {MAGMA_API_KEY}"
-    if MAGMA_API_KEY:
-        headers["Authorization"] = MAGMA_API_KEY
     payload = {"query": query}
     if variables:
         payload["variables"] = variables
@@ -401,61 +541,340 @@ async def get_magma_node_score():
 @app.get("/api/magma/recommend")
 async def get_magma_recommendations():
     """
-    Return top Magma offers as channel recommendations, sorted by fee efficiency.
+    Return top Magma offers Mercury actually qualifies for, sorted by total fee.
+    Uses authenticated getOffers with conditions filtering based on Mercury's live capacity.
     Human approval required before any action.
     """
-    info = lncli("getinfo")
-    if not info:
-        raise HTTPException(status_code=503, detail="LND unavailable")
+    # Get Mercury's current total channel capacity
+    channels_data = lncli("listchannels")
+    channels = channels_data.get("channels", []) if channels_data else []
+    node_capacity = sum(int(c.get("capacity", 0)) for c in channels)
+
+    api_key = MAGMA_API_KEY
+    env_path = os.path.expanduser("~/.mercury/amboss.env")
+    if not api_key and os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.startswith("MAGMA_API_KEY="):
+                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
 
     query = """
     {
+      getOffers {
+        list {
+          id
+          account
+          min_size
+          max_size
+          fee_rate
+          base_fee
+          status
+          conditions { condition operator value }
+        }
+      }
+    }
+    """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    AMBOSS_GRAPHQL = "https://api.amboss.space/graphql"
+
+    # Pre-build alias map from local LND graph
+    alias_map: dict = {}
+    try:
+        graph = lncli("describegraph")
+        for n in (graph or {}).get("nodes", []):
+            pub = n.get("pub_key", "")
+            alias = n.get("alias", "")
+            if pub and alias:
+                alias_map[pub] = alias
+    except Exception:
+        pass
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(AMBOSS_GRAPHQL, json={"query": query}, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+
+        offers = data.get("data", {}).get("getOffers", {}).get("list", [])
+
+        TARGET_SIZE = 5_000_000  # default buy target for fee calculation
+        qualifying = []
+        for o in offers:
+            if o.get("status") not in (None, "ACTIVE", "ENABLED", "active", "enabled"):
+                if o.get("status") and o.get("status").upper() not in ("ACTIVE", "ENABLED"):
+                    pass  # include anyway — status field varies
+
+            conds = o.get("conditions") or []
+            blocked = False
+            for c in conds:
+                cond = c.get("condition", "")
+                val = c.get("value", "")
+                op = c.get("operator", "")
+                if cond == "NODE_CAPACITY":
+                    req_cap = int(val)
+                    if op in ("GREATER_THAN", "GREATER_THAN_OR_EQUAL_TO"):
+                        if node_capacity < req_cap:
+                            blocked = True
+            if blocked:
+                continue
+
+            mx = int(o.get("max_size") or 0)
+            mn = int(o.get("min_size") or 0)
+            fr = int(o.get("fee_rate") or 0)
+            bf = int(o.get("base_fee") or 0)
+            if mx < 1_000_000:
+                continue
+            buy_size = min(TARGET_SIZE, mx)
+            if buy_size < mn:
+                continue
+
+            total_fee = bf + int(fr * buy_size / 1_000_000)
+            qualifying.append({
+                "offer_id":       o["id"],
+                "node_alias":     alias_map.get(str(o.get("account","")), str(o.get("account","unknown"))[:20]),
+                "node_pubkey":    str(o.get("account","")),
+                "size_sat":       buy_size,
+                "max_size":       mx,
+                "fee_rate_ppm":   fr,
+                "fee_fixed_sat":  bf,
+                "total_fee_sat":  total_fee,
+            })
+
+        qualifying.sort(key=lambda x: x["total_fee_sat"])
+        return {
+            "recommendations":  qualifying[:10],
+            "count":            len(qualifying),
+            "node_capacity_sat": node_capacity,
+            "action_required":  "human_approval",
+            "note": (
+                f"Filtered to offers Mercury qualifies for "
+                f"(node capacity: {node_capacity:,} SAT). "
+                "READ-ONLY — human approval required before purchasing."
+            ),
+        }
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Magma unreachable: {e}")
+
+
+@app.post("/api/magma/buy")
+async def buy_magma_channel(req: MagmaBuyRequest):
+    """
+    Initiate a Magma channel purchase via the Amboss API.
+    Requires a valid MAGMA_API_KEY (passed in request body or from server env).
+    Returns the fee invoice (BOLT11) to pay to complete the channel open.
+    """
+    api_key = req.api_key or MAGMA_API_KEY
+    if not api_key:
+        raise HTTPException(
+            status_code=403,
+            detail="MAGMA_API_KEY not configured. Visit amboss.space to create an account and generate a key.",
+        )
+
+    # Get our node pubkey for the buy request
+    info = lncli("getinfo")
+    our_pubkey = info.get("identity_pubkey", "")
+    if not our_pubkey:
+        raise HTTPException(status_code=503, detail="Could not retrieve node pubkey from LND")
+
+    # Amboss Magma GraphQL mutation — market.order.create (correct v2 API)
+    # Introspected from magma.amboss.tech/graphql: nested mutation structure.
+    mutation = """
+    mutation CreateManualOrder($input: CreateManualOrderInput!) {
       market {
-        offer {
-          offers {
-            total
-            list {
+        order {
+          create(input: $input) {
+            id
+            status
+            payment {
               id
-              status
-              total_amount { satoshi { sats } }
-              fees { fixed { sats } variable { sats } }
-              node { alias }
+              pending
+              lightning {
+                invoice
+                pending
+              }
             }
           }
         }
       }
     }
     """
-    try:
-        data = await magma_query(query)
-        raw = data.get("market", {}).get("offer", {}).get("offers", {})
-        offers = [o for o in raw.get("list", []) if o["status"] == "ENABLED"]
-        # Sort by variable fee (ppm) ascending — best routing value first
-        def fee_ppm(o):
-            try:
-                size = int(o["total_amount"]["satoshi"]["sats"])
-                var = int(o["fees"]["variable"]["sats"])
-                return round(var / size * 1_000_000) if size > 0 else 999999
-            except (TypeError, KeyError, ZeroDivisionError):
-                return 999999
-        offers_sorted = sorted(offers, key=fee_ppm)[:10]
-        return {
-            "recommendations": [
-                {
-                    "node_alias": o.get("node", {}).get("alias", "unknown"),
-                    "offer_id": o["id"],
-                    "size_sat": int(o["total_amount"]["satoshi"]["sats"]),
-                    "fee_fixed_sat": int(o["fees"]["fixed"]["sats"]),
-                    "fee_variable_ppm": fee_ppm(o),
-                }
-                for o in offers_sorted
-            ],
-            "count": len(offers_sorted),
-            "action_required": "human_approval",
-            "note": "READ-ONLY — sorted by lowest fee rate. Human approval required before purchasing.",
+    variables = {
+        "input": {
+            "offer_id":        req.offer_id,
+            "size":            str(req.size_sat),
+            "pubkey":          our_pubkey,
+            "payment_method":  "SATS",
         }
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    payload = {"query": mutation, "variables": variables}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(MAGMA_GRAPHQL, json=payload, headers=headers)
+            if r.status_code >= 400:
+                try:
+                    body = r.json()
+                    err_detail = body.get("errors", [{}])[0].get("message", r.text[:300])
+                except Exception:
+                    err_detail = r.text[:300]
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Amboss HTTP {r.status_code}: {err_detail}"
+                )
+            data = r.json()
+
+        if "errors" in data:
+            err_msg = "; ".join(e.get("message", str(e)) for e in data["errors"])
+            raise HTTPException(status_code=502, detail=f"Amboss error: {err_msg}")
+
+        order = (data.get("data") or {}).get("market", {}).get("order", {}).get("create")
+        if not order:
+            raise HTTPException(status_code=502, detail="Amboss returned empty order — offer may have expired or size is invalid")
+
+        order_id = order.get("id", "")
+        order_status = order.get("status", "")
+        payment = order.get("payment") or {}
+        lightning = payment.get("lightning") or {}
+        invoice = lightning.get("invoice", "")
+
+        # Persist order locally for `magma status`
+        _save_magma_order({
+            "order_id":    order_id,
+            "offer_id":    req.offer_id,
+            "size_sat":    int(req.size_sat),
+            "status":      order_status or "submitted",
+            "created_at":  datetime.now(timezone.utc).isoformat(),
+        })
+
+        return {
+            "status": order_status or "submitted",
+            "purchase_id": order_id,
+            "invoice": invoice,
+            "note": (
+                "Order placed. Pay the invoice below to complete the channel open. "
+                "Then run `mercury channels` to see it appear as pending."
+                if invoice else
+                "Order placed with Amboss. The liquidity provider will open a channel "
+                "to your node shortly. Run `mercury channels` to see it appear as pending."
+            ),
+        }
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Amboss API error: {e.response.status_code}")
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=503, detail=f"Magma unreachable: {e}")
+        raise HTTPException(status_code=503, detail=f"Amboss unreachable: {e}")
+
+
+# ── Magma order persistence ────────────────────────────────────────────────────
+
+def _load_magma_orders() -> list:
+    """Load locally cached Magma orders from disk."""
+    try:
+        os.makedirs(os.path.dirname(ORDERS_FILE), exist_ok=True)
+        with open(ORDERS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_magma_order(order: dict):
+    """Append a new Magma order to the local orders file."""
+    orders = _load_magma_orders()
+    # Deduplicate by order_id
+    orders = [o for o in orders if o.get("order_id") != order.get("order_id")]
+    orders.append(order)
+    os.makedirs(os.path.dirname(ORDERS_FILE), exist_ok=True)
+    with open(ORDERS_FILE, "w") as f:
+        json.dump(orders, f, indent=2)
+
+
+@app.get("/api/magma/orders")
+async def get_magma_orders():
+    """
+    Return all Magma inbound liquidity orders placed from this node.
+    Reads locally cached orders then refreshes status from Amboss for each.
+    """
+    api_key = MAGMA_API_KEY
+    cached = _load_magma_orders()
+    if not cached:
+        return {"orders": [], "total": 0}
+
+    results = []
+    for o in cached:
+        offer_id = o.get("offer_id", "")
+        order_id = o.get("order_id", "")
+        live_status = o.get("status", "unknown")
+        seller_alias = o.get("seller_alias", "")
+
+        # Try to refresh status from Amboss via get_offer → orders
+        if offer_id and api_key:
+            try:
+                query = """
+                query GetOfferOrders($offer_id: String!) {
+                  market {
+                    offer {
+                      get_offer(offer_id: $offer_id) {
+                        node { alias }
+                        orders {
+                          list {
+                            id
+                            status
+                            amount { sat }
+                            created_at
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                }
+                async with httpx.AsyncClient(timeout=15) as client:
+                    r = await client.post(
+                        MAGMA_GRAPHQL,
+                        json={"query": query, "variables": {"offer_id": offer_id}},
+                        headers=headers,
+                    )
+                    data = r.json()
+
+                offer_data = (
+                    (data.get("data") or {})
+                    .get("market", {})
+                    .get("offer", {})
+                    .get("get_offer") or {}
+                )
+                if not seller_alias:
+                    seller_alias = (offer_data.get("node") or {}).get("alias", "")
+
+                for ord_item in (offer_data.get("orders") or {}).get("list") or []:
+                    if ord_item.get("id") == order_id:
+                        live_status = ord_item.get("status", live_status)
+                        break
+            except Exception:
+                pass  # fall back to cached status
+
+        results.append({
+            "order_id":    order_id,
+            "offer_id":    offer_id,
+            "size_sat":    o.get("size_sat", 0),
+            "status":      live_status,
+            "seller":      seller_alias,
+            "created_at":  o.get("created_at", ""),
+        })
+
+    # Most recent first
+    results.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return {"orders": results, "total": len(results)}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
