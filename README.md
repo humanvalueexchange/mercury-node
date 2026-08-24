@@ -1,205 +1,158 @@
-# Mercury Node 🪐
+# Mercury Node
 
-**The world's simplest AI-first Bitcoin Lightning node.**
+Mercury Node is a self-hosted Bitcoin and Lightning operator console with a local
+AI assistant. The current reference deployment is a **Debian GNU/Linux 13
+(trixie), ARM64 Raspberry Pi 5-class node** with a Hailo-10H PCIe accelerator.
 
-Buy a Raspberry Pi 5 (16GB) + Hailo-8L Hat. Run one command. Get a fully sovereign, AI-powered Bitcoin node with an intelligent agent living inside it — working for you 24/7.
+> **Deployment status:** This repository is under active development. The live
+> reference host and the checked-in installer are not identical; do not use the
+> installer with production funds without reviewing its limitations below.
 
-```bash
-curl -fsSL https://get.mercury-node.dev/install | bash
-```
+## Current reference stack
 
-> No cloud. No KYC. No counterparty.  
-> Just your own AI-powered Bitcoin & Lightning node that actually talks back to you.
-
----
-
-## What is Mercury Node?
-
-Mercury Node is a complete, open-source Bitcoin and Lightning stack with a built-in AI agent — running entirely on your own hardware, with your own keys, under your own control.
-
-No cloud. No custodian. No counterparty. Just you, your Pi, and your Bitcoin.
-
-```
-$ mercury status
-
-🟢 Mercury Node v1.0.0
-─────────────────────────────────────
-Node      HVE-Mercury
-Network   mainnet | block 949,677 ✅
-Wallet    1,247,891 SAT confirmed
-Channels  3 active | avg balance 54%
-Uptime    14 days, 6 hours
-─────────────────────────────────────
-
-$ mercury ask "should I rebalance any channels right now?"
-
-Your ACINQ channel is well-balanced at 58% local.
-Your WoS channel is getting low at 18% — recommend
-rebalancing 30,000 SAT to restore routing balance.
-```
-
----
-
-## What's Inside
-
-| Layer | Technology |
+| Layer | Current contract |
 |---|---|
-| Bitcoin full node | Bitcoin Core (native, ARM64) |
-| Lightning Network | LND (native, ARM64) |
-| Payment server | BTCPay Server |
-| Chain indexer | NBXplorer |
-| Reverse proxy | nginx |
-| AI agent brain | Qwen family via native llama.cpp; Hailo-10H present in the reference deployment |
-| Agent API | FastAPI (mercury-agent service) |
-| CLI | `mercury` — terminal-native control |
-| Agent mesh | MCP server (agent-to-agent Lightning discovery) |
+| Operating system | Debian 13 (trixie), `aarch64`/ARM64 |
+| Hardware | Raspberry Pi 5-class ARM64 host, 16 GiB RAM |
+| AI accelerator | Hailo-10H PCIe co-processor |
+| Local model | `Qwen3.8-2B-Distill-Q4_K_M.gguf` via native `llama.cpp` |
+| LLM service | `llama-server` on `127.0.0.1:8089` |
+| Bitcoin | Bitcoin Core 30.2.0; data at `/mnt/blockchain/bitcoin` |
+| Lightning | LND 0.20.1-beta; data at `/var/lib/lnd` |
+| Agent | FastAPI service, version 0.5.5, on `127.0.0.1:8088` |
+| Application layout | `/opt/mercury` |
+| Supporting services | NBXplorer, BTCPay Server, nginx |
 
-> **Current reference deployment:** The operated node is documented in
-> [docs/current-state.md](docs/current-state.md). It currently runs Debian 13 on a
-> Raspberry Pi 5-class ARM64 host with Hailo-10H, Bitcoin Core 30.2.0, LND 0.20.1-beta,
-> and native llama.cpp.
+See [docs/current-state.md](docs/current-state.md) for the dated live snapshot,
+[docs/architecture.md](docs/architecture.md) for service boundaries, and
+[docs/hardware-bom.md](docs/hardware-bom.md) for the reference hardware.
 
----
+## Layout
 
-## Hardware Requirements
+The live deployment keeps Mercury application files under:
 
-| Component | Spec | Where to buy |
-|---|---|---|
-| **Raspberry Pi 5** | **16GB RAM** (8GB not supported) | raspberrypi.com |
-| **Hailo-8L AI Hat** | M.2 form factor | hailo.ai |
-| **NVMe SSD** | 1TB minimum (2TB recommended) | Any M.2 NVMe |
-| **NVMe Hat** | Pi 5 M.2 Hat+ | raspberrypi.com |
-| **Power supply** | 27W USB-C (official Pi 5 PSU) | raspberrypi.com |
-| **Case** | Optional — keep it cool | Any Pi 5 case |
-| **microSD** | 32GB+ (OS only) | Any Class 10 |
-
-**Estimated BOM cost: ~$250–300 USD**
-
-> Full hardware assembly guide with photos: [docs/hardware-assembly.md](docs/hardware-assembly.md)
-
----
-
-## Quick Start
-
-### 1. Flash the OS
-Flash a supported 64-bit ARM Linux installation to the boot device using Raspberry Pi Imager.
-Enable SSH in the imager settings. Boot your Pi.
-
-### 2. Run the installer
-SSH into your Pi and run:
-```bash
-curl -fsSL https://get.mercury-node.dev/install | bash
+```text
+/opt/mercury/
+├── agent/main.py
+├── llama.cpp/bin/llama-server
+├── llama.cpp/lib/
+└── models/Qwen3.8-2B-Distill-Q4_K_M.gguf
 ```
 
-The installer will:
-- Detect your hardware (Pi 5 + Hailo required)
-- Install the full Bitcoin + Lightning stack
-- Walk you through your wallet seed ceremony (write down your 24 words)
-- Start the Mercury agent
-- Print your first `mercury status`
+The agent's systemd unit runs as `lnd` from `/opt/mercury/agent`. The local LLM
+unit runs `llama-server` on localhost port 8089. Bitcoin data is on the separate
+blockchain volume mounted at `/mnt/blockchain`.
 
-**Initial sync takes approximately 72 hours.** Your Lightning node is usable immediately — the Bitcoin chain syncs in the background.
+## CLI
 
-### 3. You're sovereign
-
-```bash
-mercury status          # Node health at a glance
-mercury channels        # Lightning channel overview
-mercury invoices        # Recent payments
-mercury ask "..."       # Ask your node anything
-```
-
----
-
-## The Mercury CLI
+The checked-in CLI is `mercury`. Its interactive shell includes the version
+display; the argparse command list is available with `mercury --help`.
+These are the implemented node-facing commands:
 
 ```bash
-# Node operations
-mercury status                    # Full health summary
-mercury sync                      # Show IBD / sync progress
-
-# Lightning
-mercury channels                  # List active channels with balance %
-mercury invoices [--last N]       # Recent invoices
-mercury pay <BOLT11>              # Send a Lightning payment
-mercury invoice <SAT> [memo]      # Create a Lightning invoice
-
-# AI interface
-mercury ask "<question>"          # Natural language node query
-mercury ask "rebalance advice"    # Get channel rebalancing recommendation
-mercury ask "show routing fees"   # Fee revenue summary
-
-# Administration
-mercury logs [service]            # Live log tail (lnd, btcpay, bitcoind, agent)
-mercury restart [service]         # Restart a service
-mercury backup                    # Export static channel backup
-mercury update                    # Update Mercury Node to latest version
+mercury status [--ai]
+mercury health [--ai]
+mercury sync [--ai]
+mercury channels [--ai]
+mercury invoices [--last N] [--recent|--pending]
+mercury payments [--limit N] [--ai]
+mercury peers [--ai]
+mercury routing [DAYS] [--ai]
+mercury transactions [--limit N] [--all] [--ai]
+mercury logs [lnd|bitcoind|btcpayserver|nbxplorer|nginx|mercury-agent]
+mercury backup
+mercury ask "<question>"
+mercury shell
 ```
 
----
-
-## The Agent Mesh (MCP)
-
-Every Mercury Node publishes an MCP server. When two Mercury nodes open a Lightning channel to each other, their agents discover each other automatically — no directory, no configuration.
-
-Agent-to-agent queries cost 100 mSat each. Intelligence flows over the same rails as money.
+Payment and channel operations are also implemented:
 
 ```bash
-# Ask your node to query a peer's node
-mercury ask "what fee rate is peer 03864ef using on their channels?"
-# → Mercury pays 100 mSat, queries peer's agent, returns the answer
+mercury invoice <SAT> [memo]
+mercury charge <SAT> [memo]
+mercury pay <BOLT11>
+mercury deposit [--amount SAT]
+mercury send <BITCOIN_ADDRESS> <SAT>
+mercury channel open <peer-alias|pubkey@host:port> <SAT>
+mercury channel close <alias|channel_point>
+mercury rebalance [--amount SAT] [--dry-run]
+mercury fees [set <PPM> [BASE_MSAT]]
+mercury nodes
+mercury magma [offers|score|recommend|buy|status|auth]
 ```
 
-This is the foundation of a global Lightning-native AI mesh. Every Mercury Node is a node in it.
+`pay`, `send`, channel changes, fee changes, and Magma purchases can affect
+funds or node state. Review the command's confirmation prompt and the
+transaction/invoice details before approving.
 
----
+The CLI also contains operator integrations such as `alerts`, `post`,
+`post-share`, `suggest`, `vote`, `rank-backlog`, `recommend`, and `tonight`.
+Those commands are not part of the node's public HTTP API.
 
-## Roadmap
+## Agent API
 
-| Version | Status | What ships |
-|---|---|---|
-| v0.1 | 🔨 In development | One-command install, full Bitcoin stack |
-| v0.2 | Planned | `mercury` CLI, FastAPI agent, Telegram alerts |
-| v0.3 | Planned | `mercury ask`, Phi-3.5-mini on Hailo-8L |
-| v0.4 | Planned | MCP server, local peer discovery |
-| v1.0 | Planned | Agent-to-agent Lightning mesh, public registry, public launch |
+The FastAPI service listens on localhost by default:
 
----
+```bash
+curl http://127.0.0.1:8088/health
+curl http://127.0.0.1:8088/api/status
+```
 
-## Philosophy
+Implemented routes are:
 
-Mercury Node is built on four principles:
+```text
+GET  /health
+GET  /api/status
+GET  /api/channels
+GET  /api/invoices?last=N
+GET  /api/sync
+GET  /api/peers
+POST /api/backup
+GET  /api/routing?limit=N&days=D
+GET  /api/payments?limit=N
+GET  /api/magma/offers?min_sat=N&max_sat=N
+GET  /api/magma/node-score
+GET  /api/magma/recommend
+POST /api/magma/buy
+GET  /api/magma/orders
+```
 
-1. **Sovereignty first.** Your keys. Your node. Your Bitcoin. No exceptions.
-2. **Closest to metal.** Native binaries only. No Docker. No Snap. Every abstraction removed is one fewer failure point.
-3. **Intelligence should be cheap and local.** AI inference runs on Hailo at <2W. You don't need a cloud API to have an intelligent node.
-4. **Open source is the only option.** A sovereign money system deserves sovereign software. Audit everything.
+Read routes are intentionally operational telemetry. `POST /api/backup`
+requires the `X-Mercury-Backup-Token` header and a configured
+`MERCURY_BACKUP_TOKEN`. `POST /api/magma/buy` requires `MAGMA_API_KEY`; it
+creates an Amboss order and returns an invoice, but does not autonomously pay it.
 
----
+## Installer limitations
 
-## Built by Human Value Exchange
+`install.sh` is now a verified partial installer for Bitcoin Core, LND, the
+Mercury agent, and the CLI. It installs under `/opt/mercury`, verifies the
+published Bitcoin Core/LND checksums, preserves existing wallet configuration,
+and refuses unsupported flags or unmanaged service-unit replacements.
 
-Mercury Node is the flagship open-source project of [Human Value Exchange](https://hvecorp.com) — a Bitcoin-only AI company building sovereign financial infrastructure.
+It intentionally does not install BTCPay Server, NBXplorer, nginx, llama.cpp,
+models, Hailo drivers, or UTXO snapshots. Review the script and complete those
+optional components independently before using it as a production deployment.
 
-Our production Mercury node has been running since 2026. This code runs our treasury.
+## Registry and MCP status
 
----
+The registry refactor is partially landed: `ToolRegistry`, `ToolSpec`, and
+permission types exist, and `node.status` is registered and tested. The rest of
+the CLI still uses its existing dispatch table; registry discovery and complete
+CLI/API migration are not finished.
 
-## Contributing
+There is no checked-in MCP server, agent-card endpoint, Lightning-paid
+agent-to-agent mesh, or public Mercury Registry implementation. Older Hailo-8L,
+Phi-3.5, MCP, and automatic peer-discovery descriptions are obsolete design
+claims, not current capabilities.
 
-Mercury Node is currently in private development. **Public launch targeted for July 2026.**
+## Security
 
-⭐ **Star this repo to be notified at launch.**
-
-📬 **[Join the early access waitlist →](https://mercury-node.dev/waitlist)**  
-Be the first to know when Mercury Node ships. First 100 nodes get dedicated onboarding support.
-
----
+The node is designed so the money layer remains independent from the AI layer.
+Keep LND RPC, the agent, and the LLM bound to localhost unless an authenticated
+reverse-proxy design is in place. Protect the wallet seed, LND credentials,
+environment files, and static channel backups as secrets. See
+[SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT — use it, fork it, build on it.
-
----
-
-*"We don't just run a Bitcoin node. We have an AI agent that lives inside it and works for us 24/7."*
+MIT.

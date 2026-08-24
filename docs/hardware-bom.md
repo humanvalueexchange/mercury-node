@@ -1,92 +1,95 @@
-# Mercury Node — Hardware Bill of Materials
+# Mercury Node Hardware BOM
 
-**Version:** 1.0  
-**Last updated:** 2026-05-16  
-**Estimated total cost:** ~$250–320 USD
+**Status:** Live reference hardware
+**Snapshot:** 2026-08-23
 
-> The live reference deployment has diverged from this original target BOM. See
-> [current-state.md](current-state.md) for the observed hardware and software specification.
+This document describes the currently operated node, not a guaranteed retail
+kit or a claim that `install.sh` can reproduce it. Exact prices and vendors
+vary; storage, cooling, power, and backup choices should be sized for 24/7
+Bitcoin operation.
 
----
+## Observed reference system
 
-## Required Components
-
-| # | Component | Spec | Est. Price | Where to Buy |
-|---|---|---|---|---|
-| 1 | **Raspberry Pi 5** | **16GB RAM** ⚠️ (8GB not supported) | $80 | raspberrypi.com, Adafruit, Pimoroni |
-| 2 | **Hailo-8L AI Hat** | M.2 2242 form factor | $70 | hailo.ai, Seeed Studio |
-| 3 | **NVMe SSD** | 2TB M.2 2242 NVMe (1TB minimum) | $80–120 | Samsung, WD, Kingston |
-| 4 | **Pi 5 M.2 NVMe Hat+** | Official Raspberry Pi M.2 Hat+ | $12 | raspberrypi.com |
-| 5 | **Power Supply** | 27W USB-C (official Pi 5 PSU) | $12 | raspberrypi.com |
-| 6 | **microSD Card** | 32GB+ Class 10 / A2 (OS only) | $8 | Samsung, SanDisk |
-
----
-
-## Recommended Accessories
-
-| Component | Purpose | Est. Price |
-|---|---|---|
-| Pi 5 case with active cooling | Thermal management (24/7 operation) | $15–25 |
-| Ethernet cable | Wired LAN preferred over WiFi | $5 |
-| UPS (small) | Power outage protection | $30–50 |
-
----
-
-## Important Notes
-
-### ⚠️ Must use Pi 5 16GB
-The 8GB variant does not have sufficient RAM for the full Mercury Node stack under load. Bitcoin Core + LND + BTCPay + NBXplorer + Mercury Agent requires approximately 6-8GB at peak. Only the **16GB model** is supported.
-
-### NVMe form factor
-The official Pi 5 M.2 Hat+ supports **M.2 2242 and 2280** drives. Verify your NVMe SSD is one of these form factors. Most laptop SSDs are 2280 — both are compatible.
-
-### Hailo-8L Hat stacking
-The Hailo-8L M.2 Hat and NVMe M.2 Hat+ can be stacked using the official Pi 5 stacking headers. Both connect via the Pi 5's PCIe FFC connector — only one can use it at a time. Use the **Hailo AI Kit** which includes an M.2 HAT+ board that accepts both the Hailo module and an NVMe drive.
-
-**Recommended purchase:** Raspberry Pi AI Kit (includes Hailo-8L + M.2 Hat+) — simplifies stacking.
-
-### Power requirements
-The 27W official Pi 5 PSU is required for stable operation with NVMe + Hailo active. Standard 5V/3A supplies will undervolt and cause instability.
-
----
-
-## Full Build Cost Breakdown
-
-| Scenario | Components | Cost |
-|---|---|---|
-| **Minimum** | Pi 5 16GB + basic NVMe (1TB) + Hailo + Hat+ + PSU + microSD | ~$250 |
-| **Recommended** | Above + 2TB NVMe + active cooling case + Ethernet | ~$300 |
-| **Full kit + UPS** | Above + UPS | ~$340 |
-
----
-
-## Software (all free, open-source)
-
-| Software | License |
+| Component | Reference specification |
 |---|---|
-| Mercury Node | MIT |
-| Bitcoin Core | MIT |
-| LND | MIT |
-| BTCPay Server | MIT |
-| NBXplorer | MIT |
-| Qwen family / llama.cpp | Various open-source licenses |
-| Debian GNU/Linux | GPL and other open-source licenses |
+| Host | Raspberry Pi 5-class ARM64 system |
+| CPU | 4-core ARM Cortex-A76 |
+| Memory | 16 GiB RAM |
+| OS | Debian GNU/Linux 13 (trixie), `aarch64` |
+| Root storage | 1.9 TB ext4 mounted at `/` |
+| Blockchain storage | 1.8 TB ext4 volume mounted at `/mnt/blockchain` |
+| Boot storage | 512 MB FAT boot partition |
+| AI accelerator | Hailo-10H PCIe co-processor |
+| Hailo firmware | 5.1.1 observed on the snapshot host |
+| Swap | 2 GiB zram observed |
+| Cooling | Active cooling is recommended for continuous load |
+| Network | Wired Ethernet is preferred |
 
----
+The active local model is `Qwen3.8-2B-Distill-Q4_K_M.gguf`, served by native
+`llama.cpp`. The Hailo-10H is part of the reference hardware; the old Hailo-8L
+and Phi-3.5-mini BOM is obsolete.
 
-## Assembly Guide
+## Procurement guidance
 
-See [docs/hardware-assembly.md](hardware-assembly.md) for step-by-step photos and assembly instructions.
+For a new build, target:
 
----
+| Item | Guidance |
+|---|---|
+| ARM64 host | Raspberry Pi 5-class board with 16 GiB RAM and supported PCIe |
+| AI accelerator | Hailo-10H-compatible PCIe hardware and current firmware |
+| Storage | At least 2 TB fast NVMe-class storage; separate blockchain volume is preferred |
+| Power | Official or equivalent supply with adequate sustained headroom |
+| Cooling | Active heatsink/fan solution rated for 24/7 operation |
+| Network | Stable wired Ethernet |
+| Power protection | UPS or clean shutdown capability |
+| Backup media | Offline, encrypted media for static channel backups and configuration |
 
-## Where to Buy (Recommended Sources)
+The Bitcoin chain grows, and model/tooling upgrades consume space. Do not size
+the disk from the historical 500 GB installer minimum.
 
-| Source | Ships to | Notes |
-|---|---|---|
-| raspberrypi.com | Worldwide | Official Pi 5, M.2 Hat+, AI Kit, PSU |
-| hailo.ai | Worldwide | Official Hailo-8L products |
-| seeedstudio.com | Worldwide | Hailo modules + Pi accessories |
-| adafruit.com | US + intl | Pi 5, accessories, good tutorials |
-| pimoroni.com | UK + intl | Pi 5, great for EU buyers |
-| amazon.com | Worldwide | NVMe SSDs, microSD, cases |
+## Software and storage contract
+
+| Workload | Live location |
+|---|---|
+| Bitcoin Core 30.2.0 data/config | `/mnt/blockchain/bitcoin` |
+| LND 0.20.1-beta data | `/var/lib/lnd` |
+| Mercury agent | `/opt/mercury/agent` |
+| llama.cpp binaries/libraries | `/opt/mercury/llama.cpp` |
+| Qwen model files | `/opt/mercury/models` |
+| Static channel backups | `/var/lib/mercury/backups` |
+
+NBXplorer and BTCPay Server are installed under `/opt/nbxplorer` and
+`/opt/btcpayserver` on the reference host. They are supporting services, not
+replacements for Bitcoin Core or LND.
+
+## Thermal and maintenance notes
+
+The snapshot host was approximately 67.75 °C and reported a non-zero historical
+throttling flag. Check thermals, power, cooling, and bootloader status during a
+maintenance window before relying on the node for uninterrupted service.
+
+Monitor capacity and health with:
+
+```bash
+df -h
+free -h
+nvidia-smi                 # only where an NVIDIA device is present
+htop
+sudo systemctl status bitcoind lnd mercury-agent mercury-llm
+```
+
+`nvidia-smi` is not expected to report the Pi/Hailo accelerator; it is included
+only for mixed or attached operator systems.
+
+## Historical assumptions removed
+
+The following are not requirements for the current contract:
+
+- Hailo-8L AI Hat
+- Phi-3.5-mini model
+- 8 GB memory as a supported target
+- a single 500 GB root-disk minimum
+- the installer’s `/var/lib/bitcoind` and `/var/lib/mercury` layout
+
+See [docs/current-state.md](current-state.md) for the complete dated snapshot
+and [docs/architecture.md](architecture.md) for runtime relationships.

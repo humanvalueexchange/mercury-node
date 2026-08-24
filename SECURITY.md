@@ -1,55 +1,106 @@
 # Security Policy
 
-## Supported Versions
+Mercury Node can operate a real Bitcoin wallet. Treat the host, wallet seed,
+LND credentials, environment files, and static channel backups as sensitive.
+This repository is under active development; audit the exact deployment before
+using production funds.
 
-| Version | Supported |
+## Supported versions
+
+| Version | Support status |
 |---|---|
-| v1.0.x (when released) | ✅ |
-| v0.x (development) | Development only — not for production use with real funds |
+| Current repository/live deployment | Best-effort development support |
+| Older v0.x designs | Not supported |
 
-## Reporting a Vulnerability
+The live reference deployment uses Bitcoin Core 30.2.0, LND 0.20.1-beta,
+Mercury Agent 0.5.5, and Qwen3.8-2B through native llama.cpp. Hailo-8L,
+Phi-3.5-mini, MCP mesh, and public registry claims describe obsolete or
+unimplemented designs.
 
-Mercury Node handles real Bitcoin. Security vulnerabilities are taken extremely seriously.
+## Reporting a vulnerability
 
-**Do NOT open a public GitHub issue for security vulnerabilities.**
+Do **not** open a public GitHub issue for a vulnerability. Report privately to
+**security@hvecorp.com** with:
 
-Report security issues privately to: **security@hvecorp.com**
+- a description and affected component;
+- reproducible steps or a minimal proof of concept;
+- impact, especially whether funds, wallet recovery material, or node control
+  can be affected;
+- suggested mitigation, if available.
 
-Include:
-- Description of the vulnerability
-- Steps to reproduce
-- Potential impact (especially: can it affect funds?)
-- Your suggested fix (optional but appreciated)
+Please avoid accessing or modifying data that is not yours. We will acknowledge
+reports within 24 hours and prioritize critical issues for an emergency fix.
 
-We will acknowledge within 24 hours and aim to have a fix within 7 days for critical issues.
+## Threat model
 
-## Responsible Disclosure
+The security priorities are:
 
-We ask that you:
-- Give us reasonable time to fix before public disclosure
-- Do not exploit the vulnerability beyond what's needed to demonstrate it
-- Do not access or modify other users' data
+1. **Key safety:** the wallet seed must never enter the repository, logs, API
+   responses, chat prompts, or third-party services.
+2. **Fund safety:** AI recommendations are advisory. The agent has no intended
+   autonomous payment loop; fund-moving CLI actions require an operator to
+   invoke and approve them.
+3. **Service isolation:** a failed Mercury agent must not stop Bitcoin Core or
+   LND.
+4. **Local exposure:** LND RPC, the agent API, and the llama.cpp endpoint bind
+   to localhost by default.
+5. **Credential protection:** LND credentials, the wallet-unlock password file,
+   `MERCURY_BACKUP_TOKEN`, and `MAGMA_API_KEY` must be root/operator secrets.
 
-In return, we will:
-- Acknowledge your report promptly
-- Keep you informed of fix progress
-- Credit you in the release notes (unless you prefer anonymity)
+This is not a claim that a compromised host is safe. The agent runs as `lnd`
+because it invokes `lncli` against `/var/lib/lnd`; host compromise or theft of
+the LND account, wallet files, seed, or secrets remains a fund-risk scenario.
 
-## Threat Model
+## API security
 
-Mercury Node's threat model prioritizes:
-1. **Key safety** — your 24-word seed never leaves your hardware
-2. **Fund safety** — the Mercury agent has read-only access; it cannot move funds autonomously above the configured threshold
-3. **Node availability** — the Bitcoin stack must survive agent crashes
-4. **Network security** — LND gRPC and BTCPay are not exposed to the internet by default
+The FastAPI agent defaults to `127.0.0.1:8088`; the local LLM defaults to
+`127.0.0.1:8089`. Do not expose either port directly to the Internet.
 
-## Static Channel Backups
+- Telemetry GET routes expose node status, balances, channel information,
+  invoices, peers, routing, and payment history to any client that can reach
+  the bound service.
+- `POST /api/backup` is disabled unless `MERCURY_BACKUP_TOKEN` is configured
+  and supplied as `X-Mercury-Backup-Token`.
+- `POST /api/magma/buy` requires `MAGMA_API_KEY`. It creates a remote Amboss
+  order and returns a Lightning invoice; it does not pay the invoice.
+- CORS origins are opt-in through `MERCURY_CORS_ORIGINS`; an allowed origin is
+  not an authentication mechanism.
 
-Static channel backups are sensitive recovery material and must be treated as secrets.
-Mercury stores them under `/var/lib/mercury/backups` with a `0700` directory and `0600` file
-permissions, owned by the `lnd` service account.
+If remote access is required, put the service behind an authenticated,
+encrypted reverse proxy or private network and restrict the exposed routes.
 
-The HTTP backup endpoint is disabled unless `MERCURY_BACKUP_TOKEN` is configured through
-the root-owned `/etc/mercury/agent.env` file. The agent binds to localhost by default;
-do not expose port 8088 directly to the internet. Encrypt backups before copying them
-off-device, and keep the wallet seed separate from the backups.
+## Filesystem and service controls
+
+The reference system stores application code and models under `/opt/mercury`,
+Bitcoin data under `/mnt/blockchain/bitcoin`, LND data under `/var/lib/lnd`,
+and backups under `/var/lib/mercury/backups`.
+
+`mercury-agent.service` runs as `lnd` with `NoNewPrivileges=yes`,
+`ProtectSystem=strict`, and explicit write paths limited to
+`/var/lib/mercury` and `/var/lib/lnd`. The agent unit is restartable and does
+not own the Bitcoin or LND service lifecycle.
+
+## Static channel backups
+
+Static channel backups are recovery material, not ordinary logs:
+
+- directory: `/var/lib/mercury/backups`, mode `0700`;
+- files: timestamped `channels-*.bak`, mode `0600`, owned for LND access;
+- HTTP export: disabled unless `MERCURY_BACKUP_TOKEN` is set;
+- off-device copies: encrypt them and use controlled, offline-capable media;
+- wallet seed: store separately; an SCB does not replace the seed.
+
+Verify backup freshness with `mercury backup` and perform recovery drills before
+depending on a backup during an incident.
+
+## Installer warning
+
+The checked-in `install.sh` is a verified partial installer for Bitcoin Core,
+LND, the Mercury agent, and the CLI. It preserves existing Bitcoin/LND
+configuration, verifies published artifact checksums, installs the
+`/opt/mercury` layout, and refuses unsupported options or replacement of
+unmanaged systemd units.
+
+It does not install BTCPay Server, NBXplorer, nginx, llama.cpp, models, Hailo
+drivers, or UTXO snapshots. Treat those components as separate deployment work
+and independently review the installer before using it with production funds.

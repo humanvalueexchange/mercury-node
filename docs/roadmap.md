@@ -1,131 +1,89 @@
-# Mercury Node — Roadmap
+# Mercury Node Roadmap
 
-**Vision:** The world's simplest AI-first Bitcoin Lightning node.  
-**Public launch target:** Q3 2026
+**Status:** Current plan, aligned to the live reference deployment
+**Updated:** 2026-08-23
 
----
+The live reference node is ahead of the original v0.1 design, but the
+repository's installer and documentation still contain historical assumptions.
+Roadmap items below distinguish shipped repository capabilities from planned
+work; unchecked items are not promises of the current installer.
 
-## Release Plan
+## Current baseline
 
-### v0.1 — Foundation
-*Target: Week 3 (June 6, 2026)*
+- [x] Debian 13 (trixie), ARM64 Raspberry Pi 5-class reference host
+- [x] Hailo-10H reference hardware
+- [x] Bitcoin Core 30.2.0 and LND 0.20.1-beta in the live deployment
+- [x] Mercury Agent 0.5.5 with FastAPI telemetry and Magma routes
+- [x] Native llama.cpp `llama-server` with Qwen3.8-2B-Distill
+- [x] `/opt/mercury` live application layout
+- [x] Operational CLI for status, health, sync, channels, invoices, payments,
+  routing, backups, logs, AI queries, channel operations, and diagnostics
+- [x] Backup endpoint token check and restrictive backup file permissions
 
-The Bitcoin stack, fully automated.
+Hailo-8L, Phi-3.5-mini, and the old Hailo-specific inference path are retired
+claims. They are not current milestones.
 
-- [ ] `install.sh` — 5-phase installer with hardware detection
-- [ ] Hailo-8L driver installation and pinning
-- [ ] Bitcoin Core (native ARM64, mainnet)
-- [ ] LND (native ARM64, auto-unlock)
-- [ ] NBXplorer + BTCPay Server
-- [ ] nginx reverse proxy
-- [ ] Wallet seed ceremony (interactive, secure)
-- [ ] Systemd service units for all 5 services
-- [ ] `--snapshot` flag for fast IBD
-- [ ] `--verify` flag for checksum audit
-- [ ] Basic `mercury status` command (shell script)
+## Near-term repository work
 
-**Success criteria:** Fresh Pi 5 → fully operational Bitcoin+Lightning node in one command.
+### Installer reconciliation
 
----
+- [x] Pin verified Bitcoin Core 30.2 and LND 0.20.1-beta artifacts.
+- [x] Deploy the Mercury application into `/opt/mercury` with the CLI package.
+- [x] Add protected configuration handling, preflight checks, and real
+  checksum verification.
+- [x] Remove unsupported snapshot and optional-component claims.
+- [ ] Add separately reviewed BTCPay Server, NBXplorer, nginx, llama.cpp, and
+  model provisioning.
+- [ ] Add upgrade/rollback support and a production wallet migration guide.
 
-### v0.2 — CLI Agent
-*Target: Week 5 (June 20, 2026)*
+### Registry refactor
 
-Mercury gets a voice.
+- [x] Introduce typed `ToolSpec`, `Permission`, and `ToolRegistry`.
+- [x] Register `node.status` as a read-only tool.
+- [x] Test duplicate registration, lookup, and confirmation enforcement.
+- [ ] Register the remaining CLI operations.
+- [ ] Assign explicit permission policies to all fund-moving and administrative
+  commands.
+- [ ] Add input schemas and a stable listing/introspection interface.
+- [ ] Decide whether agent API handlers should share registry metadata.
 
-- [ ] `mercury-agent` FastAPI service (systemd managed)
-- [ ] `mercury` CLI binary (`/usr/local/bin/mercury`)
-- [ ] `mercury status` — full node health (LND + bitcoind + services)
-- [ ] `mercury channels` — channel list with balance percentages
-- [ ] `mercury invoices [--last N]` — recent payment history
-- [ ] `mercury sync` — IBD / sync progress bar
-- [ ] `mercury logs [service]` — live log tail
-- [ ] `mercury backup` — static channel backup export
-- [ ] Telegram alert on payment received
-- [ ] Daily health digest (cron, 06:30)
-- [ ] LND readonly macaroon scoping (agent never has wallet write access)
+The registry is currently a partial refactor, not a complete authorization
+boundary.
 
-**Success criteria:** `mercury status` returns clean output in <1 second. Payment received fires Telegram within 5 seconds.
+### Operational hardening
 
----
+- [ ] Add deployment documentation for the observed systemd units and
+  `/etc/mercury/agent.env`.
+- [ ] Document and test authenticated reverse-proxy exposure, if remote API
+  access is needed.
+- [ ] Add backup restore drills and monitoring for stale static channel backups.
+- [ ] Add compatibility checks for Bitcoin Core, LND, llama.cpp, and model
+  upgrades on ARM64.
 
-### v0.3 — Intelligence
-*Target: Week 7 (July 4, 2026)*
+## Future capabilities
 
-Mercury gets a brain.
+These remain proposals and are not present in the current source:
 
-- [ ] Phi-3.5-mini model download in installer
-- [ ] `hailo_inference.py` — llama.cpp + Hailo-8L backend
-- [ ] `context_builder.py` — live node state injected into system prompt
-- [ ] `mercury ask "<question>"` — natural language node queries
-- [ ] Response latency target: <3 seconds on Hailo
-- [ ] Graceful fallback if Hailo unavailable (CPU inference, slower)
-- [ ] Context types: channel health, payment history, routing, balance, general BTC
+- [ ] MCP server and agent-card endpoint
+- [ ] Authenticated, payment-gated agent-to-agent API
+- [ ] Peer discovery over Lightning gossip or mDNS
+- [ ] Opt-in public Mercury Registry
+- [ ] Automatic agent-to-agent Lightning payments
+- [ ] Mobile companion and push notification product
+- [ ] Anomaly detection, fee forecasting, and routing optimization models
 
-**Success criteria:** `mercury ask "how are my channels?"` returns accurate, actionable response in <3 seconds.
+Any future mesh or registry work must preserve the current security boundary:
+the AI layer must not gain autonomous authority to move funds, and a node must
+remain usable without a public directory or cloud service.
 
----
+## Design principles
 
-### v0.4 — MCP Server
-*Target: Week 9 (July 18, 2026)*
-
-Mercury joins the mesh.
-
-- [ ] MCP server at `/mcp/` endpoint
-- [ ] Agent card at `/.well-known/agent.json`
-- [ ] mDNS discovery (`_mercury._tcp.local`)
-- [ ] Lightning payment-gated API (100 mSat/call)
-- [ ] Preimage-based auth (pay → get token → query)
-- [ ] `/mcp/query` endpoint (read-only node data)
-- [ ] Peer agent discovery via LND custom messages
-- [ ] `mercury peers` — list discovered Mercury peer agents
-
-**Success criteria:** Two Mercury nodes on same LAN discover each other via mDNS. Payment-gated query succeeds end-to-end.
-
----
-
-### v1.0 — Public Launch
-*Target: Week 12 (August 8, 2026)*
-
-Mercury is ready for the world.
-
-- [ ] All v0.x milestones complete and stable
-- [ ] Agent-to-agent Lightning query working across internet (not just LAN)
-- [ ] Mercury Registry opt-in (registry.mercury-node.dev)
-- [ ] `mercury update` — self-update command
-- [ ] Full test suite (install smoke test, CLI tests, agent API tests)
-- [ ] Complete documentation (README, architecture, BOM with photos, troubleshooting)
-- [ ] SECURITY.md and responsible disclosure policy
-- [ ] GitHub repo made public
-- [ ] Launch announcement
-
-**Success criteria:** A technically competent person can go from zero to running Mercury Node in under 10 minutes of active work (excluding IBD sync time).
-
----
-
-## Future Milestones (Post-v1.0)
-
-### v1.1 — Hailo-8L Intelligence Expansion
-- Anomaly detection model (unusual payment patterns, channel drain)
-- Fee prediction model (optimize routing revenue)
-- `mercury forecast` — next 24h routing fee prediction
-
-### v1.2 — Mercury Mobile Companion
-- iOS/Android app for `mercury status` and payment alerts
-- QR code invoice generation
-- Push notifications via self-hosted ntfy or Telegram
-
-### v2.0 — Mercury Network
-- Full Lightning-native AI mesh (thousands of nodes)
-- Agent knowledge sharing (routing intelligence propagates through network)
-- Mercury DAO (node operators earn governance via routing volume)
-
----
-
-## Design Principles (non-negotiable across all versions)
-
-1. **Sovereignty first.** The Bitcoin stack works identically with or without the agent.
-2. **Closest to metal.** Native binaries only. No Docker. No Snap.
-3. **Agent is a guest.** `mercury-agent` crashes alone. Never affects funds.
-4. **Honest UX.** IBD takes 72 hours. We say so clearly.
-5. **Open source is the only option.** Audit everything. MIT license.
+1. **Sovereignty first:** keys and wallet control stay with the operator.
+2. **Money layer isolation:** Bitcoin Core and LND must continue to work if
+   Mercury fails.
+3. **Local by default:** telemetry and inference bind to localhost unless an
+   explicitly secured deployment requires otherwise.
+4. **Human approval for value transfer:** recommendations may be automated;
+   payments, channel changes, and purchases require operator approval.
+5. **Honest documentation:** live behavior, installer behavior, and future
+   designs are labeled separately.

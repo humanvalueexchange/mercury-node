@@ -1,5 +1,5 @@
 """
-Mercury Agent — v0.5.2
+Mercury Agent - v0.5.5
 FastAPI service exposing Mercury node status + Magma liquidity intelligence for the AI agent layer.
 
 Endpoints:
@@ -429,11 +429,16 @@ def get_payments(limit: int = 50):
 
 # ── Magma helpers ─────────────────────────────────────────────────────────────
 
+def _magma_headers(api_key: str = "") -> dict:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    return headers
+
+
 async def magma_query(query: str, variables: dict = None):
     """Execute a GraphQL query against the Amboss Magma API."""
-    headers = {"Content-Type": "application/json"}
-    if MAGMA_API_KEY:
-        headers["Authorization"] = f"Bearer {MAGMA_API_KEY}"
+    headers = _magma_headers(MAGMA_API_KEY)
     payload = {"query": query}
     if variables:
         payload["variables"] = variables
@@ -574,9 +579,7 @@ async def get_magma_recommendations():
       }
     }
     """
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _magma_headers(api_key)
 
     AMBOSS_GRAPHQL = "https://api.amboss.space/graphql"
 
@@ -710,10 +713,7 @@ async def buy_magma_channel(req: MagmaBuyRequest):
         }
     }
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
+    headers = _magma_headers(api_key)
     payload = {"query": mutation, "variables": variables}
 
     try:
@@ -835,10 +835,7 @@ async def get_magma_orders():
                   }
                 }
                 """
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                }
+                headers = _magma_headers(api_key)
                 async with httpx.AsyncClient(timeout=15) as client:
                     r = await client.post(
                         MAGMA_GRAPHQL,

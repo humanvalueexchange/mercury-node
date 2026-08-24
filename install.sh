@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
-# Mercury Node Installer v0.1
-# https://github.com/HansHWestphal/mercury-node
+# Mercury Node installer
 #
-# Usage:
-#   curl -fsSL https://mercury-node.dev/install | bash
-#   curl -fsSL https://mercury-node.dev/install | bash -s -- --snapshot
-#   curl -fsSL https://mercury-node.dev/install | bash -s -- --verify
+# This installer intentionally installs only the components that are present in
+# this repository and whose upstream artifacts can be verified.  BTCPay Server,
+# NBXplorer, llama.cpp, and accelerator/model drivers are not installed here.
 
-set -euo pipefail
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
 
-# ─── Constants ────────────────────────────────────────────────────────────────
-MERCURY_VERSION="0.1.0"
-BITCOIN_VERSION="27.1"
-LND_VERSION="0.18.3-beta"
-NBXPLORER_VERSION="2.5.0"
-BTCPAY_VERSION="2.0.0"
-PHI_MODEL_URL="https://huggingface.co/microsoft/Phi-3.5-mini-instruct-gguf/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf"
+MERCURY_VERSION="0.10.0"
+BITCOIN_VERSION="30.2"
+LND_VERSION="0.20.1-beta"
+BITCOIN_SHA256="73e76c14edc79808a0511c744d102ffbb494807ee90cbcba176568243254b532"
+LND_SHA256="013489343eebe8b0213b5f52fc7570e6f873f3f17974826cb94125ee1287d306"
 
-MIN_RAM_GB=15
-MIN_DISK_GB=500
-REQUIRED_ARCH="aarch64"
+MIN_RAM_GB=16
+MIN_DISK_GB=1000
+INSTALL_ROOT="/opt/mercury"
+BITCOIN_DATADIR="${MERCURY_BITCOIN_DATADIR:-/var/lib/bitcoin}"
+SCRIPT_DIR=""
+if [[ -n "${BASH_SOURCE[0]-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+fi
+SOURCE_DIR="${MERCURY_SOURCE_DIR:-$SCRIPT_DIR}"
+DOWNLOAD_DIR="${INSTALL_ROOT}/downloads"
+BITCOIN_CONF="/etc/bitcoin/bitcoin.conf"
+LND_CONF="/var/lib/lnd/lnd.conf"
+AGENT_ENV="/etc/mercury/agent.env"
 
 RED='\033[0;31m'
 YEL='\033[1;33m'
@@ -27,301 +35,486 @@ GRN='\033[0;32m'
 BLU='\033[0;34m'
 NC='\033[0m'
 
-SNAPSHOT_MODE=false
 VERIFY_ONLY=false
+BITCOIN_RPC_USER="mercury"
+BITCOIN_RPC_PASSWORD=""
 
-# ─── Argument parsing ─────────────────────────────────────────────────────────
-for arg in "$@"; do
-  case $arg in
-    --snapshot) SNAPSHOT_MODE=true ;;
-    --verify)   VERIFY_ONLY=true ;;
-    --help|-h)
-      echo "Mercury Node Installer"
-      echo "  --snapshot   Use UTXO snapshot for faster IBD (~4h vs ~72h)"
-      echo "  --verify     Print all checksums and exit (no install)"
-      exit 0 ;;
-  esac
-done
+log()  { printf '%b[mercury]%b %s\n' "$BLU" "$NC" "$*"; }
+ok()   { printf '%b[  ok  ]%b %s\n' "$GRN" "$NC" "$*"; }
+warn() { printf '%b[ warn ]%b %s\n' "$YEL" "$NC" "$*"; }
+die()  { printf '%b[ FAIL ]%b %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-log()  { echo -e "${BLU}[mercury]${NC} $*"; }
-ok()   { echo -e "${GRN}[  ok  ]${NC} $*"; }
-warn() { echo -e "${YEL}[ warn ]${NC} $*"; }
-fail() { echo -e "${RED}[ FAIL ]${NC} $*"; exit 1; }
+usage() {
+  cat <<'EOF'
+Mercury Node installer
 
-banner() {
-  echo ""
-  echo -e "${BLU}  ███╗   ███╗███████╗██████╗  ██████╗██╗   ██╗██████╗ ██╗   ██╗${NC}"
-  echo -e "${BLU}  ████╗ ████║██╔════╝██╔══██╗██╔════╝██║   ██║██╔══██╗╚██╗ ██╔╝${NC}"
-  echo -e "${BLU}  ██╔████╔██║█████╗  ██████╔╝██║     ██║   ██║██████╔╝ ╚████╔╝ ${NC}"
-  echo -e "${BLU}  ██║╚██╔╝██║██╔══╝  ██╔══██╗██║     ██║   ██║██╔══██╗  ╚██╔╝  ${NC}"
-  echo -e "${BLU}  ██║ ╚═╝ ██║███████╗██║  ██║╚██████╗╚██████╔╝██║  ██║   ██║   ${NC}"
-  echo -e "${BLU}  ╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝  ${NC}"
-  echo ""
-  echo -e "  ${GRN}Mercury Node v${MERCURY_VERSION}${NC} — AI-first sovereign Bitcoin Lightning node"
-  echo ""
+Usage:
+  sudo bash install.sh [--verify]
+
+Options:
+  --verify       Verify an existing installation without changing it.
+  --help         Show this help.
+
+The installer must run from a Mercury Node checkout.  For stdin/curl use:
+  MERCURY_SOURCE_DIR=/path/to/mercury-node sudo -E bash install.sh
+
+BTCPay Server, NBXplorer, llama.cpp, model downloads, Hailo drivers, and
+Bitcoin UTXO snapshots are unsupported by this installer and are never
+silently reported as installed.
+EOF
 }
 
-# ─── Phase 1: Hardware Validation ─────────────────────────────────────────────
-phase1_hardware() {
-  log "Phase 1/5 — Hardware validation"
-
-  # Architecture
-  local arch
-  arch=$(uname -m)
-  [[ "$arch" == "$REQUIRED_ARCH" ]] || fail "Requires aarch64 (ARM64). Got: $arch"
-  ok "Architecture: $arch"
-
-  # RAM
-  local ram_kb ram_gb
-  ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-  ram_gb=$((ram_kb / 1024 / 1024))
-  [[ $ram_gb -ge $MIN_RAM_GB ]] || fail "Requires ${MIN_RAM_GB}GB RAM minimum. Got: ${ram_gb}GB. Use Pi 5 16GB."
-  ok "RAM: ${ram_gb}GB"
-
-  # Disk
-  local disk_gb
-  disk_gb=$(df / --output=avail -BG | tail -1 | tr -d 'G ')
-  [[ $disk_gb -ge $MIN_DISK_GB ]] || fail "Requires ${MIN_DISK_GB}GB free disk. Got: ${disk_gb}GB."
-  ok "Disk: ${disk_gb}GB available"
-
-  # Hailo-8L detection
-  if lspci 2>/dev/null | grep -qi hailo; then
-    ok "Hailo-8L: detected via PCIe"
-  elif ls /dev/hailo* 2>/dev/null | grep -q hailo; then
-    ok "Hailo-8L: detected via /dev"
-  else
-    warn "Hailo-8L not detected. AI features (mercury ask) will be disabled."
-    warn "Install Hailo-8L Hat and re-run installer to enable intelligence layer."
-    HAILO_AVAILABLE=false
-  fi
-
-  ok "Hardware validation passed"
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
-# ─── Phase 2: System Foundation ───────────────────────────────────────────────
-phase2_system() {
-  log "Phase 2/5 — System foundation"
-
-  apt-get update -qq
-  apt-get install -y -qq \
-    curl wget git build-essential \
-    nginx certbot python3-certbot-nginx \
-    python3 python3-pip python3-venv \
-    jq unzip tar || fail "apt install failed"
-
-  # Create system users
-  for user in bitcoin lnd btcpay mercury; do
-    id "$user" &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin "$user"
-    ok "User: $user"
+parse_args() {
+  while (($#)); do
+    case "$1" in
+      --verify) VERIFY_ONLY=true ;;
+      --help|-h) usage; exit 0 ;;
+      --snapshot|--with-btcpay|--with-nbxplorer|--with-llama)
+        die "$1 is unsupported: no verified implementation is included; refusing to continue"
+        ;;
+      *) die "Unknown option: $1 (use --help)" ;;
+    esac
+    shift
   done
+}
 
-  # Data directories
-  install -d -m 750 -o bitcoin -g bitcoin /var/lib/bitcoind
-  install -d -m 750 -o lnd     -g lnd     /var/lib/lnd
-  install -d -m 750 -o btcpay  -g btcpay  /var/lib/btcpayserver
-  install -d -m 750 -o mercury -g mercury /var/lib/mercury
-  install -d -m 755            /usr/local/lib/mercury
+check_root() {
+  [[ "$EUID" -eq 0 ]] || die "Run as root: sudo bash install.sh"
+}
 
-  # Hailo drivers (if available)
-  if [[ "${HAILO_AVAILABLE:-true}" == "true" ]]; then
-    phase2_hailo
+check_source_tree() {
+  [[ -n "$SOURCE_DIR" && -d "$SOURCE_DIR" ]] ||
+    die "Mercury source checkout not found; set MERCURY_SOURCE_DIR to its path"
+  [[ -f "$SOURCE_DIR/src/agent/main.py" ]] ||
+    die "Missing source file: src/agent/main.py"
+  [[ -f "$SOURCE_DIR/src/agent/requirements.txt" ]] ||
+    die "Missing source file: src/agent/requirements.txt"
+  [[ -f "$SOURCE_DIR/src/cli/mercury" ]] ||
+    die "Missing source file: src/cli/mercury"
+  [[ -d "$SOURCE_DIR/src/cli/mercury_cli" ]] ||
+    die "Missing source package: src/cli/mercury_cli"
+}
+
+phase_hardware() {
+  log "Validating Debian 13 ARM64 Raspberry Pi host"
+  require_cmd uname
+  require_cmd awk
+  require_cmd df
+
+  [[ "$(uname -m)" == "aarch64" ]] ||
+    die "Requires ARM64/aarch64; found $(uname -m)"
+
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ "${ID:-}" == "debian" && "${VERSION_ID:-}" == "13" ]] ||
+    die "Requires Debian 13 (trixie); found ${PRETTY_NAME:-unknown}"
+
+  local model ram_kb ram_gb disk_gb
+  model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)"
+  [[ "$model" =~ Raspberry[[:space:]]+Pi ]] ||
+    die "Requires a Raspberry Pi deployment; found ${model:-unknown platform}"
+  [[ "$model" =~ Raspberry[[:space:]]+Pi[[:space:]]+5 ]] ||
+    die "Requires Raspberry Pi 5 hardware; found ${model:-unknown model}"
+  ok "Platform: $model"
+
+  ram_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)"
+  ram_gb=$((ram_kb / 1024 / 1024))
+  ((ram_gb >= MIN_RAM_GB)) ||
+    die "Requires at least ${MIN_RAM_GB}GiB RAM; found ${ram_gb}GiB"
+  ok "Memory: ${ram_gb}GiB"
+
+  disk_gb="$(df -P -BG / | awk 'NR == 2 {gsub(/G/, "", $4); print $4}')"
+  ((disk_gb >= MIN_DISK_GB)) ||
+    die "Requires at least ${MIN_DISK_GB}GiB free on /; found ${disk_gb}GiB"
+  ok "Free storage: ${disk_gb}GiB"
+}
+
+ensure_user() {
+  local name="$1" home="$2"
+  if ! id "$name" >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir "$home" \
+      --shell /usr/sbin/nologin "$name"
+  fi
+  id "$name" >/dev/null 2>&1 || die "Could not create service user: $name"
+}
+
+phase_packages_and_layout() {
+  log "Installing Debian prerequisites and creating service layout"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    ca-certificates curl python3 python3-venv tar xz-utils systemd
+
+  [[ "$BITCOIN_DATADIR" == /* && "$BITCOIN_DATADIR" != *[[:space:]]* ]] ||
+    die "MERCURY_BITCOIN_DATADIR must be an absolute path without whitespace"
+
+  ensure_user bitcoin "$BITCOIN_DATADIR"
+  ensure_user lnd /var/lib/lnd
+  ensure_user mercury /var/lib/mercury
+
+  install -d -m 0755 -o root -g root "$INSTALL_ROOT"
+  install -d -m 0755 -o root -g root "$DOWNLOAD_DIR"
+  install -d -m 0750 -o bitcoin -g bitcoin "$BITCOIN_DATADIR"
+  install -d -m 0750 -o lnd -g lnd /var/lib/lnd
+  install -d -m 0700 -o lnd -g lnd /var/lib/mercury /var/lib/mercury/backups
+  install -d -m 0755 -o root -g root /etc/bitcoin /etc/mercury
+  ok "Filesystem layout: $INSTALL_ROOT, /var/lib/lnd, /var/lib/mercury"
+}
+
+download_verified() {
+  local url="$1" expected="$2" destination="$3" actual
+  if [[ -e "$destination" ]]; then
+    [[ -f "$destination" ]] || die "Download path is not a regular file: $destination"
+  else
+    log "Downloading $(basename "$destination")"
+    curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      --output "$destination" "$url"
+    chmod 0644 "$destination"
+  fi
+  actual="$(sha256sum "$destination" | awk '{print $1}')"
+  [[ "$actual" == "$expected" ]] ||
+    die "Checksum mismatch for $(basename "$destination"); refusing to use it"
+  ok "Verified $(basename "$destination")"
+}
+
+install_archive_member() {
+  local archive="$1" member="$2" destination="$3"
+  tar -tzf "$archive" | grep -Fqx "$member" ||
+    die "Expected member missing from $(basename "$archive"): $member"
+  tar -xOzf "$archive" "$member" | install -o root -g root -m 0755 /dev/stdin "$destination"
+}
+
+phase_bitcoin() {
+  local archive
+  archive="$DOWNLOAD_DIR/bitcoin-${BITCOIN_VERSION}-aarch64-linux-gnu.tar.gz"
+  download_verified \
+    "https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/$(basename "$archive")" \
+    "$BITCOIN_SHA256" "$archive"
+  install_archive_member "$archive" \
+    "bitcoin-${BITCOIN_VERSION}/bin/bitcoind" /usr/local/bin/bitcoind
+  install_archive_member "$archive" \
+    "bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli" /usr/local/bin/bitcoin-cli
+  ok "Bitcoin Core ${BITCOIN_VERSION} binaries installed"
+}
+
+phase_lnd() {
+  local archive
+  archive="$DOWNLOAD_DIR/lnd-linux-arm64-v${LND_VERSION}.tar.gz"
+  download_verified \
+    "https://github.com/lightningnetwork/lnd/releases/download/v${LND_VERSION}/$(basename "$archive")" \
+    "$LND_SHA256" "$archive"
+  install_archive_member "$archive" \
+    "lnd-linux-arm64-v${LND_VERSION}/lnd" /usr/local/bin/lnd
+  install_archive_member "$archive" \
+    "lnd-linux-arm64-v${LND_VERSION}/lncli" /usr/local/bin/lncli
+  ok "LND ${LND_VERSION} binaries installed"
+}
+
+config_value() {
+  local key="$1" file="$2"
+  awk -F= -v key="$key" '
+    $1 == key {
+      sub(/^[^=]*=/, "", $0)
+      print $0
+      exit
+    }
+  ' "$file"
+}
+
+write_bitcoin_config() {
+  if [[ -e "$BITCOIN_CONF" ]]; then
+    BITCOIN_RPC_USER="$(config_value rpcuser "$BITCOIN_CONF")"
+    BITCOIN_RPC_PASSWORD="$(config_value rpcpassword "$BITCOIN_CONF")"
+    [[ -n "$BITCOIN_RPC_USER" && ${#BITCOIN_RPC_PASSWORD} -ge 32 ]] ||
+      die "$BITCOIN_CONF exists without a usable rpcuser/rpcpassword; refusing to alter it"
+    warn "Preserving existing $BITCOIN_CONF"
+    return
   fi
 
-  ok "System foundation ready"
-}
-
-phase2_hailo() {
-  log "Installing Hailo PCIe drivers (pinned v4.19.0)"
-  # Hailo official repo
-  wget -qO /tmp/hailo-all_4.19.0_arm64.deb \
-    "https://hailo-hailort.s3.amazonaws.com/Hailo8/4.19.0/hailo-all_4.19.0_arm64.deb" || {
-    warn "Hailo driver download failed — AI features disabled"
-    HAILO_AVAILABLE=false
-    return
-  }
-  dpkg -i /tmp/hailo-all_4.19.0_arm64.deb
-  # Pin driver version — prevent kernel update breaking Hailo
-  echo "hailo-all hold" | dpkg --set-selections
-  ok "Hailo drivers installed and pinned at v4.19.0"
-}
-
-# ─── Phase 3: Bitcoin Stack ────────────────────────────────────────────────────
-phase3_bitcoin_stack() {
-  log "Phase 3/5 — Bitcoin stack"
-
-  phase3_bitcoind
-  phase3_lnd
-  phase3_nbxplorer
-  phase3_btcpayserver
-  phase3_nginx
-
-  ok "Bitcoin stack installed"
-}
-
-phase3_bitcoind() {
-  log "Installing Bitcoin Core v${BITCOIN_VERSION}"
-  wget -qO /tmp/bitcoin.tar.gz \
-    "https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-aarch64-linux-gnu.tar.gz"
-  tar -xzf /tmp/bitcoin.tar.gz -C /tmp
-  install -m 755 /tmp/bitcoin-${BITCOIN_VERSION}/bin/bitcoind /usr/local/bin/
-  install -m 755 /tmp/bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli /usr/local/bin/
-
-  # Config
-  cat > /etc/bitcoin/bitcoin.conf << 'EOF'
-mainnet=1
+  BITCOIN_RPC_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  cat > "$BITCOIN_CONF" <<EOF
+# Managed by Mercury Node installer.  Do not share this file.
+chain=main
 server=1
-txindex=0
+txindex=1
 prune=0
-rpcuser=mercury
-rpcpassword=CHANGEME_ON_FIRST_BOOT
+datadir=${BITCOIN_DATADIR}
+rpcuser=${BITCOIN_RPC_USER}
+rpcpassword=${BITCOIN_RPC_PASSWORD}
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1
 zmqpubrawblock=tcp://127.0.0.1:28332
 zmqpubrawtx=tcp://127.0.0.1:28333
 EOF
-  chmod 640 /etc/bitcoin/bitcoin.conf
-  chown bitcoin:bitcoin /etc/bitcoin/bitcoin.conf
+  chown bitcoin:bitcoin "$BITCOIN_CONF"
+  chmod 0640 "$BITCOIN_CONF"
+  ok "Created protected Bitcoin Core configuration"
+}
 
-  # Systemd
-  cp /usr/local/lib/mercury/systemd/bitcoind.service /etc/systemd/system/
+write_lnd_config() {
+  if [[ -e "$LND_CONF" ]]; then
+    warn "Preserving existing $LND_CONF"
+    return
+  fi
+  cat > "$LND_CONF" <<EOF
+# Managed by Mercury Node installer.  Keep this file readable only by lnd.
+bitcoin.active=1
+bitcoin.mainnet=1
+bitcoin.node=bitcoind
+bitcoind.rpchost=127.0.0.1:8332
+bitcoind.rpcuser=${BITCOIN_RPC_USER}
+bitcoind.rpcpass=${BITCOIN_RPC_PASSWORD}
+bitcoind.zmqpubrawblock=tcp://127.0.0.1:28332
+bitcoind.zmqpubrawtx=tcp://127.0.0.1:28333
+listen=0.0.0.0:9735
+rpclisten=127.0.0.1:10009
+restlisten=127.0.0.1:8080
+EOF
+  chown lnd:lnd "$LND_CONF"
+  chmod 0600 "$LND_CONF"
+  ok "Created protected LND configuration"
+}
+
+install_source_file() {
+  local source="$1" destination="$2" mode="$3"
+  install -o root -g root -m "$mode" "$source" "$destination"
+}
+
+install_source_tree() {
+  local source_root="$1" destination_root="$2" file relative mode
+  while IFS= read -r -d '' file; do
+    relative="${file#"$source_root"/}"
+    mode=0644
+    [[ "$relative" == "mercury" ]] && mode=0755
+    install -D -o root -g root -m "$mode" "$file" "$destination_root/$relative"
+  done < <(find "$source_root" -type f -print0)
+}
+
+phase_mercury() {
+  log "Installing Mercury agent, CLI, and Python requirements"
+  install -d -m 0755 -o root -g root \
+    "$INSTALL_ROOT/agent" "$INSTALL_ROOT/cli"
+  install_source_file "$SOURCE_DIR/src/agent/main.py" \
+    "$INSTALL_ROOT/agent/main.py" 0644
+  install_source_file "$SOURCE_DIR/src/agent/requirements.txt" \
+    "$INSTALL_ROOT/agent/requirements.txt" 0644
+  install_source_file "$SOURCE_DIR/src/cli/mercury" \
+    "$INSTALL_ROOT/cli/mercury" 0755
+  install_source_tree "$SOURCE_DIR/src/cli/mercury_cli" \
+    "$INSTALL_ROOT/cli/mercury_cli"
+  if [[ -e /usr/local/bin/mercury && ! -L /usr/local/bin/mercury ]]; then
+    die "Refusing to replace an unmanaged file: /usr/local/bin/mercury"
+  fi
+  if [[ -L /usr/local/bin/mercury &&
+        "$(readlink /usr/local/bin/mercury)" != "$INSTALL_ROOT/cli/mercury" ]]; then
+    die "Refusing to replace an unmanaged symlink: /usr/local/bin/mercury"
+  fi
+  ln -sfn "$INSTALL_ROOT/cli/mercury" /usr/local/bin/mercury
+
+  if [[ ! -x "$INSTALL_ROOT/venv/bin/python" ]]; then
+    python3 -m venv "$INSTALL_ROOT/venv"
+  fi
+  "$INSTALL_ROOT/venv/bin/python" -m pip install --disable-pip-version-check \
+    --no-input --requirement "$INSTALL_ROOT/agent/requirements.txt"
+
+  if [[ ! -e "$AGENT_ENV" ]]; then
+    install -o root -g root -m 0600 /dev/null "$AGENT_ENV"
+  else
+    warn "Preserving existing $AGENT_ENV; installer never writes secrets there"
+  fi
+  ok "Mercury source installed under $INSTALL_ROOT"
+}
+
+write_unit() {
+  local path="$1"
+  if [[ -e "$path" ]] && ! grep -Fq "Managed by Mercury Node installer" "$path"; then
+    die "Refusing to replace an unmanaged systemd unit: $path"
+  fi
+  cat > "$path"
+  chmod 0644 "$path"
+}
+
+phase_systemd() {
+  log "Installing systemd units"
+  write_unit /etc/systemd/system/bitcoind.service <<EOF
+# Managed by Mercury Node installer
+[Unit]
+Description=Bitcoin Core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bitcoin
+Group=bitcoin
+ExecStart=/usr/local/bin/bitcoind -datadir=${BITCOIN_DATADIR} -conf=${BITCOIN_CONF} -pid=/run/bitcoind/bitcoind.pid
+ExecStop=/usr/local/bin/bitcoin-cli -datadir=${BITCOIN_DATADIR} -conf=${BITCOIN_CONF} stop
+RuntimeDirectory=bitcoind
+RuntimeDirectoryMode=0750
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=infinity
+TimeoutStopSec=120
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectHome=yes
+ReadWritePaths=${BITCOIN_DATADIR} /run/bitcoind
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  write_unit /etc/systemd/system/lnd.service <<'EOF'
+# Managed by Mercury Node installer
+[Unit]
+Description=Lightning Network Daemon
+After=bitcoind.service
+Requires=bitcoind.service
+
+[Service]
+Type=simple
+User=lnd
+Group=lnd
+ExecStart=/usr/local/bin/lnd --lnddir=/var/lib/lnd
+ExecStop=/usr/local/bin/lncli --lnddir=/var/lib/lnd stop
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lnd
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  write_unit /etc/systemd/system/mercury-agent.service <<'EOF'
+# Managed by Mercury Node installer
+[Unit]
+Description=Mercury Agent API
+Documentation=https://github.com/HansHWestphal/mercury-node
+After=network-online.target lnd.service
+Requires=lnd.service
+
+[Service]
+Type=simple
+User=lnd
+Group=lnd
+WorkingDirectory=/opt/mercury/agent
+EnvironmentFile=-/etc/mercury/agent.env
+ExecStart=/opt/mercury/venv/bin/python /opt/mercury/agent/main.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/mercury /var/lib/lnd
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mercury-agent
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
   systemctl daemon-reload
-  ok "Bitcoin Core v${BITCOIN_VERSION}"
+  systemctl enable bitcoind.service lnd.service mercury-agent.service
+  ok "Systemd units installed and enabled (services are not started automatically)"
 }
 
-phase3_lnd() {
-  log "Installing LND v${LND_VERSION}"
-  wget -qO /tmp/lnd.tar.gz \
-    "https://github.com/lightningnetwork/lnd/releases/download/v${LND_VERSION}/lnd-linux-arm64-v${LND_VERSION}.tar.gz"
-  tar -xzf /tmp/lnd.tar.gz -C /tmp
-  install -m 755 /tmp/lnd-linux-arm64-v${LND_VERSION}/lnd  /usr/local/bin/
-  install -m 755 /tmp/lnd-linux-arm64-v${LND_VERSION}/lncli /usr/local/bin/
+verify_installation() {
+  log "Verifying installed artifacts and service definitions"
+  local bitcoin_version lnd_version
+  require_cmd sha256sum
+  require_cmd systemctl
+  require_cmd systemd-analyze
 
-  cp /usr/local/lib/mercury/systemd/lnd.service /etc/systemd/system/
-  systemctl daemon-reload
-  ok "LND v${LND_VERSION}"
+  [[ -x /usr/local/bin/bitcoind && -x /usr/local/bin/bitcoin-cli ]] ||
+    die "Bitcoin Core binaries are missing"
+  [[ -x /usr/local/bin/lnd && -x /usr/local/bin/lncli ]] ||
+    die "LND binaries are missing"
+  [[ -x "$INSTALL_ROOT/cli/mercury" && -d "$INSTALL_ROOT/cli/mercury_cli" ]] ||
+    die "Mercury CLI or mercury_cli package is missing"
+  [[ -x "$INSTALL_ROOT/venv/bin/python" ]] ||
+    die "Mercury Python virtual environment is missing"
+
+  bitcoin_version="$(/usr/local/bin/bitcoind --version 2>&1 | head -n 1)"
+  [[ "$bitcoin_version" == *"30.2"* ]] ||
+    die "Unexpected Bitcoin Core version: $bitcoin_version"
+  lnd_version="$(/usr/local/bin/lnd --version 2>&1 | head -n 1)"
+  [[ "$lnd_version" == *"0.20.1-beta"* ]] ||
+    die "Unexpected LND version: $lnd_version"
+
+  PYTHONPATH="$INSTALL_ROOT/agent" "$INSTALL_ROOT/venv/bin/python" -c \
+    'import fastapi, httpx, uvicorn; import main' \
+    >/dev/null 2>&1 ||
+    die "Mercury agent dependency/import verification failed"
+  PYTHONPATH="$INSTALL_ROOT/cli" "$INSTALL_ROOT/venv/bin/python" \
+    "$INSTALL_ROOT/cli/mercury" --help >/dev/null ||
+    die "Mercury CLI verification failed"
+
+  systemd-analyze verify \
+    /etc/systemd/system/bitcoind.service \
+    /etc/systemd/system/lnd.service \
+    /etc/systemd/system/mercury-agent.service
+  systemctl is-enabled bitcoind.service lnd.service mercury-agent.service >/dev/null
+  [[ "$(stat -c '%a' "$LND_CONF")" == "600" ]] ||
+    die "LND configuration permissions are not 0600"
+  [[ "$(stat -c '%a' "$BITCOIN_CONF")" == "640" ]] ||
+    die "Bitcoin configuration permissions are not 0640"
+  [[ "$(stat -c '%U:%G' "$LND_CONF")" == "lnd:lnd" ]] ||
+    die "LND configuration ownership is not lnd:lnd"
+  [[ "$(stat -c '%U:%G' "$BITCOIN_CONF")" == "bitcoin:bitcoin" ]] ||
+    die "Bitcoin configuration ownership is not bitcoin:bitcoin"
+  ok "Binaries, Python imports, CLI, configs, and systemd units verified"
 }
 
-phase3_nbxplorer() {
-  log "Installing NBXplorer v${NBXPLORER_VERSION}"
-  # dotnet install + NBXplorer binary omitted for brevity in skeleton
-  # Full implementation in scripts/install/install-nbxplorer.sh
-  ok "NBXplorer v${NBXPLORER_VERSION} (skeleton)"
-}
+final_report() {
+  cat <<EOF
 
-phase3_btcpayserver() {
-  log "Installing BTCPay Server v${BTCPAY_VERSION}"
-  # Full implementation in scripts/install/install-btcpay.sh
-  ok "BTCPay Server v${BTCPAY_VERSION} (skeleton)"
-}
+Mercury Node ${MERCURY_VERSION} installed under ${INSTALL_ROOT}.
 
-phase3_nginx() {
-  log "Configuring nginx"
-  cp /usr/local/lib/mercury/config/nginx-mercury.conf /etc/nginx/sites-available/mercury
-  ln -sf /etc/nginx/sites-available/mercury /etc/nginx/sites-enabled/
-  rm -f /etc/nginx/sites-enabled/default
-  nginx -t && systemctl reload nginx
-  ok "nginx configured"
-}
+Installed:
+  Bitcoin Core ${BITCOIN_VERSION} (enabled, not started)
+  LND ${LND_VERSION} (enabled, not started)
+  Mercury Agent API (enabled, not started)
+  mercury CLI and mercury_cli package
 
-# ─── Phase 4: Seed Ceremony (Interactive) ─────────────────────────────────────
-phase4_seed_ceremony() {
-  log "Phase 4/5 — Wallet seed ceremony"
-  echo ""
-  echo -e "${YEL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  echo -e "${YEL}  IMPORTANT: Your 24-word seed phrase is about to be generated.${NC}"
-  echo -e "${YEL}                                                               ${NC}"
-  echo -e "${YEL}  You are the ONLY person on Earth who will control this       ${NC}"
-  echo -e "${YEL}  wallet. Write down all 24 words on paper. Store it safely.  ${NC}"
-  echo -e "${YEL}  Anyone with these words can take your Bitcoin.               ${NC}"
-  echo -e "${YEL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  echo ""
-  read -r -p "Press ENTER when you have paper and pen ready..."
-
-  # Start LND for wallet creation
-  systemctl start lnd
-  sleep 5
-
-  # Interactive wallet creation
+Before starting LND, complete its wallet creation/seed ceremony locally:
+  sudo systemctl start bitcoind
+  sudo systemctl start lnd
   sudo -u lnd lncli --lnddir=/var/lib/lnd create
 
-  ok "Wallet created. Seed ceremony complete."
+Unsupported and not installed: BTCPay Server, NBXplorer, llama.cpp, model
+downloads, Hailo drivers, nginx configuration, and UTXO snapshots.
+Run 'sudo bash install.sh --verify' to repeat verification.
+EOF
 }
 
-# ─── Phase 5: Mercury Agent ────────────────────────────────────────────────────
-phase5_mercury_agent() {
-  log "Phase 5/5 — Mercury agent"
-
-  # Install mercury-agent Python service
-  python3 -m venv /var/lib/mercury/venv
-  /var/lib/mercury/venv/bin/pip install -q \
-    fastapi uvicorn grpcio grpcio-tools requests
-
-  # Deploy agent source
-  cp -r /usr/local/lib/mercury/src/agent/* /var/lib/mercury/
-  chown -R mercury:mercury /var/lib/mercury
-
-  # Deploy mercury CLI
-  install -m 755 /usr/local/lib/mercury/src/cli/mercury /usr/local/bin/mercury
-
-  # Systemd service
-  cp /usr/local/lib/mercury/systemd/mercury-agent.service /etc/systemd/system/
-  systemctl daemon-reload
-  systemctl enable mercury-agent
-  systemctl start mercury-agent
-
-  # Download Phi-3.5-mini for Hailo if available
-  if [[ "${HAILO_AVAILABLE:-true}" == "true" ]]; then
-    log "Downloading Phi-3.5-mini model (~2.2GB) — this may take a few minutes"
-    mkdir -p /var/lib/mercury/models
-    wget -q --show-progress -O /var/lib/mercury/models/phi-3.5-mini.gguf "$PHI_MODEL_URL"
-    chown mercury:mercury /var/lib/mercury/models/phi-3.5-mini.gguf
-    ok "Phi-3.5-mini downloaded"
-  fi
-
-  ok "Mercury agent running"
-}
-
-# ─── Final Report ──────────────────────────────────────────────────────────────
-final_report() {
-  echo ""
-  echo -e "${GRN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  echo -e "${GRN}  Mercury Node v${MERCURY_VERSION} installed successfully.              ${NC}"
-  echo -e "${GRN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  echo ""
-  echo "  Try it now:"
-  echo ""
-  echo -e "    ${BLU}mercury status${NC}          — Node health at a glance"
-  echo -e "    ${BLU}mercury sync${NC}            — Bitcoin sync progress"
-  echo -e "    ${BLU}mercury ask \"hello\"${NC}     — Talk to your node"
-  echo ""
-  if [[ "$SNAPSHOT_MODE" == "false" ]]; then
-    echo -e "  ${YEL}Note:${NC} Bitcoin Core is syncing from genesis. This takes ~72 hours."
-    echo       "  Your Lightning node is active now. Chain sync runs in the background."
-    echo       "  Run 'mercury sync' to check progress."
-  fi
-  echo ""
-  echo -e "  Docs:   https://github.com/HansHWestphal/mercury-node"
-  echo ""
-}
-
-# ─── Main ──────────────────────────────────────────────────────────────────────
 main() {
-  [[ $EUID -eq 0 ]] || fail "Run as root: sudo bash install.sh"
-
-  banner
-
+  parse_args "$@"
+  check_root
   if [[ "$VERIFY_ONLY" == "true" ]]; then
-    log "Verify mode — printing checksums only, no install"
-    # TODO: print all binary checksums
+    verify_installation
     exit 0
   fi
-
-  phase1_hardware
-  phase2_system
-  phase3_bitcoin_stack
-  phase4_seed_ceremony
-  phase5_mercury_agent
+  check_source_tree
+  phase_hardware
+  phase_packages_and_layout
+  phase_bitcoin
+  phase_lnd
+  write_bitcoin_config
+  write_lnd_config
+  phase_mercury
+  phase_systemd
+  verify_installation
   final_report
 }
 

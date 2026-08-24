@@ -4079,7 +4079,7 @@ def cmd_suggest(args):
         'https://api.github.com/repos/humanvalueexchange/mercury/issues',
         data=payload,
         headers={
-            'Authorization': f'Bearer {token}',
+            'Authorization': 'token ' + token,
             'Accept': 'application/vnd.github+json',
             'Content-Type': 'application/json',
             'X-GitHub-Api-Version': '2022-11-28',
@@ -4208,7 +4208,7 @@ def cmd_generate_idea(args):
         "https://api.github.com/repos/humanvalueexchange/mercury/issues",
         data=payload,
         headers={
-            "Authorization": f"Bearer {token}",
+            "Authorization": "token " + token,
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -4315,7 +4315,7 @@ def cmd_generate_backlog(args):
             "https://api.github.com/repos/humanvalueexchange/mercury/issues",
             data=payload,
             headers={
-                "Authorization": f"Bearer {token}",
+                "Authorization": "token " + token,
                 "Accept": "application/vnd.github+json",
                 "Content-Type": "application/json",
                 "X-GitHub-Api-Version": "2022-11-28",

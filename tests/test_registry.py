@@ -34,6 +34,42 @@ class ToolRegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             registry.register(tool)
 
+    def test_list_returns_immutable_registration_snapshot(self):
+        registry = ToolRegistry()
+        tool = ToolSpec("node.status", "Status", Permission.READ_ONLY, lambda args: None)
+        registry.register(tool)
+
+        listed = registry.list()
+        self.assertIsInstance(listed, tuple)
+        self.assertEqual(listed, (tool,))
+
+        registry.register(
+            ToolSpec("node.peers", "Peers", Permission.READ_ONLY, lambda args: None)
+        )
+        self.assertEqual(listed, (tool,))
+
+    def test_unknown_tool_error_identifies_requested_name(self):
+        with self.assertRaisesRegex(KeyError, "missing.tool"):
+            ToolRegistry().get("missing.tool")
+
+    def test_prepare_only_tools_are_also_confirmation_gated(self):
+        called = False
+
+        def handler(args):
+            nonlocal called
+            called = True
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec("channel.prepare", "Prepare", Permission.PREPARE_ONLY, handler)
+        )
+
+        with self.assertRaises(ToolPermissionError):
+            registry.execute("channel.prepare", None)
+        self.assertFalse(called)
+        registry.execute("channel.prepare", None, confirmed=True)
+        self.assertTrue(called)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -64,7 +64,7 @@ user `btcpay`. LND is configured with an automated wallet-unlock password file u
 | Active model | `Qwen3.8-2B-Distill-Q4_K_M.gguf` |
 | Model context | 32,768 tokens |
 | LLM threads | 4 |
-| Mercury model inventory | Phi-3.5-mini, Qwen2.5-3B, Qwen3.8-2B, Qwen3.8-4B |
+| Mercury model inventory | Qwen3.8-2B-Distill-Q4_K_M.gguf (active) |
 | Extra service | `hve-lifeos.service` |
 
 The agent binds to localhost by default. If the authenticated backup endpoint is enabled,
@@ -93,17 +93,15 @@ mercury-agent  mercury-llm  hve-lifeos
 
 ## Configuration drift from repository
 
-The current host is not produced by the repository's installer as currently committed.
+The current host was deployed before the repository's installer was rebuilt and
+may still differ in paths and optional services.
 
-1. The live deployment uses `/opt/mercury`, while the installer references `/var/lib/mercury`
-   and untracked `/usr/local/lib/mercury` staging paths.
-2. The live node uses Hailo-10H and Qwen models; repository documentation and installer still
-   describe Hailo-8L and Phi-3.5-mini as the primary stack.
-3. The live Bitcoin data directory is `/mnt/blockchain`; the installer assumes `/var/lib/bitcoind`.
-4. The live software versions are newer than the pinned installer versions.
-5. The live `mercury-agent` is version 0.5.5; the repository source has now been aligned to 0.5.5.
-6. The repository's installer still contains skeleton steps for NBXplorer, BTCPay, systemd
-   units, and deployment staging.
+1. The live Bitcoin data directory is `/mnt/blockchain`; the installer defaults to
+   `/var/lib/bitcoin` and supports `MERCURY_BITCOIN_DATADIR` for another volume.
+2. The live host already includes optional NBXplorer, BTCPay, nginx, and llama.cpp
+   services; the installer intentionally does not provision those components.
+3. The installer uses verified Bitcoin Core 30.2 and LND 0.20.1-beta artifacts,
+   while the live node may have locally customized configuration.
 
 This snapshot is descriptive only. It does not contain wallet balances, seed material,
 macaroons, passwords, private keys, or host network addresses.
