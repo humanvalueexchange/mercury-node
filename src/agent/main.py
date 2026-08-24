@@ -108,6 +108,7 @@ def get_status():
     info = lncli("getinfo")
     wallet = lncli("walletbalance")
     channel_data = lncli("listchannels")
+    pending_data = lncli("pendingchannels")
 
     services = {
         "bitcoind":   systemctl_active("bitcoind"),
@@ -117,8 +118,20 @@ def get_status():
         "nginx":      systemctl_active("nginx"),
     }
 
+    # LND listchannels returns this node's open channels; describegraph is the
+    # public gossip graph and is not used for local balance accounting.
     active_channels = channel_data.get("channels", [])
-    active_count = len([c for c in active_channels if c.get("active")])
+    active_count = int(info.get("num_active_channels", 0))
+    open_count = len(active_channels)
+    pending_count = sum(
+        len(pending_data.get(key, []))
+        for key in (
+            "pending_open_channels",
+            "pending_closing_channels",
+            "pending_force_closing_channels",
+            "waiting_close_channels",
+        )
+    )
 
     return {
         "version": AGENT_VERSION,
@@ -140,7 +153,8 @@ def get_status():
         },
         "channels": {
             "active": active_count,
-            "pending": info.get("num_pending_channels", 0),
+            "open": open_count,
+            "pending": pending_count,
         },
         "services": services,
         "uptime": get_uptime(),
@@ -170,21 +184,30 @@ def get_channels():
         })
 
     pending_out = []
-    for p in pending.get("pending_open_channels", []):
-        ch = p.get("channel", {})
-        pending_out.append({
-            "remote_pubkey": ch.get("remote_node_pub"),
-            "local_balance_sat": int(ch.get("local_balance", 0)),
-            "capacity_sat": int(ch.get("capacity", 0)),
-            "confirmation_height": p.get("confirmation_height"),
-            "commit_fee_sat": int(p.get("commit_fee", 0)),
-        })
+    pending_types = (
+        ("pending_open_channels", "opening"),
+        ("pending_closing_channels", "closing"),
+        ("pending_force_closing_channels", "force_closing"),
+        ("waiting_close_channels", "waiting_close"),
+    )
+    for key, state in pending_types:
+        for p in pending.get(key, []):
+            ch = p.get("channel", p)
+            pending_out.append({
+                "state": state,
+                "remote_pubkey": ch.get("remote_node_pub") or ch.get("remote_node_pubkey"),
+                "local_balance_sat": int(ch.get("local_balance", 0)),
+                "capacity_sat": int(ch.get("capacity", 0)),
+                "confirmation_height": p.get("confirmation_height"),
+                "commit_fee_sat": int(p.get("commit_fee", 0)),
+            })
 
     return {
         "active": channels_out,
         "pending": pending_out,
         "summary": {
-            "active_count": len(channels_out),
+            "active_count": sum(1 for c in channels_out if c["active"]),
+            "open_count": len(channels_out),
             "pending_count": len(pending_out),
             "total_local_sat": sum(c["local_balance_sat"] for c in channels_out),
             "total_remote_sat": sum(c["remote_balance_sat"] for c in channels_out),

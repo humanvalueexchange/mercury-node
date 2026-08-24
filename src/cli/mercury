@@ -207,13 +207,13 @@ def cmd_channels(args):
     channels, err = lncli("listchannels")
     pending, _ = lncli("pendingchannels")
 
-    print(f"\n{W}Lightning Channels{NC}")
+    print(f"\n{W}Open Lightning Channels{NC}")
     print(f"{DIM}{'─' * 55}{NC}")
 
     if channels:
         ch_list = channels.get("channels", [])
         if not ch_list:
-            print(f"  {Y}No active channels.{NC}")
+            print(f"  {Y}No open channels.{NC}")
         else:
             for c in ch_list:
                 local = int(c["local_balance"])
