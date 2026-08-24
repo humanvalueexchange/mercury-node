@@ -818,32 +818,39 @@ def cmd_logs(args):
     os.execlp("journalctl", "journalctl", "-u", service, "-f", "--no-pager")
 
 
-def cmd_pay(args):
-    bolt11 = args.bolt11
+@dataclass(frozen=True)
+class PayPlan:
+    """Decoded Lightning payment awaiting operator approval."""
+
+    bolt11: str
+    amount_sat: int
+    destination: str
+    memo: str
+
+
+def prepare_pay(args):
+    """Decode and validate a Lightning invoice without paying it."""
+    bolt11 = str(args.bolt11).strip()
+    if not bolt11:
+        raise ValueError("Lightning invoice is required")
     decoded, decode_err = lncli("decodepayreq", bolt11)
     if decode_err or not decoded:
-        print(f"{R}Invalid Lightning invoice: {decode_err or 'could not decode'}{NC}\n")
-        return
-    print(f"\n{W}Lightning Payment{NC}")
-    print(f"{DIM}{'─' * 55}{NC}")
-    print(f"  Invoice: {DIM}{bolt11[:60]}...{NC}")
-    print(f"  Amount:  {W}{fmt_sat(decoded.get('num_satoshis', 0))}{NC}")
-    print(f"  Payee:   {DIM}{decoded.get('destination', 'unknown')}{NC}")
-    print(f"  Memo:    {decoded.get('description', '') or '(none)'}")
-    try:
-        amount_sat = validate_amount(decoded.get("num_satoshis", 0), "Payment")
-    except ValueError as exc:
-        print(f"  {R}{exc}{NC}\n")
-        return
-    if not confirm_write(
-        "lightning payment",
-        f"amount={amount_sat} destination={decoded.get('destination', 'unknown')}",
-    ):
-        print()
-        return
+        raise ValueError(f"Invalid Lightning invoice: {decode_err or 'could not decode'}")
+    amount_sat = validate_amount(
+        decoded.get("num_satoshis", 0), "Lightning payment", minimum=0
+    )
+    return PayPlan(
+        bolt11=bolt11,
+        amount_sat=amount_sat,
+        destination=str(decoded.get("destination", "unknown")),
+        memo=str(decoded.get("description", "") or ""),
+    )
 
+
+def execute_pay(plan):
+    """Pay a previously approved Lightning invoice."""
     print(f"  {DIM}Sending...{NC}")
-    data, err = lncli("payinvoice", "--force", bolt11, timeout=60)
+    data, err = lncli("payinvoice", "--force", plan.bolt11, timeout=60)
     if err:
         print(f"  {R}Payment failed: {err}{NC}\n")
         return
@@ -857,6 +864,27 @@ def cmd_pay(args):
     else:
         print(f"  {R}Payment status: {status}{NC}")
     print(f"{DIM}{'─' * 55}{NC}\n")
+
+
+def cmd_pay(args):
+    try:
+        plan = TOOL_REGISTRY.prepare("payment.pay", args)
+    except (RuntimeError, ValueError) as exc:
+        print(f"{R}{exc}{NC}\n")
+        return
+    print(f"\n{W}Lightning Payment{NC}")
+    print(f"{DIM}{'─' * 55}{NC}")
+    print(f"  Invoice: {DIM}{plan.bolt11[:60]}...{NC}")
+    print(f"  Amount:  {W}{fmt_sat(plan.amount_sat)}{NC}")
+    print(f"  Payee:   {DIM}{plan.destination}{NC}")
+    print(f"  Memo:    {plan.memo or '(none)'}")
+    if not confirm_write(
+        "lightning payment",
+        f"amount={plan.amount_sat} destination={plan.destination}",
+    ):
+        print()
+        return
+    TOOL_REGISTRY.execute("payment.pay", plan, confirmed=True)
 
 
 
@@ -1821,6 +1849,61 @@ def cmd_magma(args):
     print(f"{DIM}{'─' * 55}{NC}\n")
 
 
+@dataclass(frozen=True)
+class ChannelOpenPlan:
+    """Validated channel-open operation awaiting approval."""
+
+    peer_uri: str
+    display_name: str
+    pubkey: str
+    amount_sat: int
+
+
+@dataclass(frozen=True)
+class ChannelClosePlan:
+    """Validated cooperative channel-close operation awaiting approval."""
+
+    channel_point: str
+    alias: str
+    local_balance_sat: int
+
+
+def execute_channel_open(plan):
+    """Connect to a peer and broadcast an approved channel open."""
+    print(f"\n  {DIM}Connecting to peer...{NC}")
+    _, conn_err = lncli("connect", plan.peer_uri)
+    if conn_err and "already connected" not in str(conn_err).lower():
+        print(f"  {Y}Connect note: {conn_err}{NC}")
+    print(f"  {DIM}Opening channel...{NC}")
+    result, err = lncli(
+        "openchannel",
+        f"--node_key={plan.pubkey}",
+        f"--local_amt={plan.amount_sat}",
+        "--min_confs=1",
+    )
+    if err:
+        print(f"  {R}Failed: {err}{NC}")
+        return
+    txid = (result or {}).get("funding_txid", "?")
+    print(f"  {G}✅ Channel opening broadcast!{NC}")
+    print(f"  Funding txid: {W}{txid}{NC}")
+    print(f"  {DIM}Track: https://mempool.space/tx/{txid}{NC}")
+    print(f"  {DIM}Run `channels` in ~30 min to see it appear as active.{NC}")
+
+
+def execute_channel_close(plan):
+    """Broadcast an approved cooperative channel close."""
+    result, err = lncli("closechannel", f"--chan_point={plan.channel_point}")
+    if err:
+        print(f"  {R}Close failed: {err}{NC}")
+        print(f"  {DIM}If the peer is offline, a force close may be needed (contact CTO).{NC}")
+        return
+    close_txid = (result or {}).get("closing_txid", "?")
+    print(f"  {G}✅ Close broadcast!{NC}")
+    print(f"  Closing txid: {W}{close_txid}{NC}")
+    print(f"  {DIM}Funds will return on-chain after ~1 block confirmation.{NC}")
+
+
 def cmd_channel(args):
     """Open or close a Lightning channel."""
     subcmd = getattr(args, 'channel_action', None)
@@ -1892,26 +1975,11 @@ def cmd_channel(args):
             print(f"{DIM}{'─' * 55}{NC}\n")
             return
 
-        # Connect to peer first
-        print(f"\n  {DIM}Connecting to peer...{NC}")
-        conn_result, conn_err = lncli("connect", resolved_uri)
-        if conn_err and "already connected" not in str(conn_err).lower():
-            print(f"  {Y}Connect note: {conn_err}{NC}")
-
-        # Open channel
-        print(f"  {DIM}Opening channel...{NC}")
-        result, err = lncli("openchannel",
-                            f"--node_key={pubkey}",
-                            f"--local_amt={sat}",
-                            "--min_confs=1")
-        if err:
-            print(f"  {R}Failed: {err}{NC}")
-        else:
-            txid = (result or {}).get("funding_txid", "?")
-            print(f"  {G}✅ Channel opening broadcast!{NC}")
-            print(f"  Funding txid: {W}{txid}{NC}")
-            print(f"  {DIM}Track: https://mempool.space/tx/{txid}{NC}")
-            print(f"  {DIM}Run `channels` in ~30 min to see it appear as active.{NC}")
+        TOOL_REGISTRY.execute(
+            "channel.open",
+            ChannelOpenPlan(resolved_uri, display_name, pubkey, sat),
+            confirmed=True,
+        )
 
     elif subcmd == "close":
         target = getattr(args, 'target', None)
@@ -1969,17 +2037,11 @@ def cmd_channel(args):
             print(f"{DIM}{'─' * 55}{NC}\n")
             return
 
-        txid_hash, vout = chan_point.rsplit(":", 1)
-        result, err = lncli("closechannel",
-                            f"--chan_point={chan_point}")
-        if err:
-            print(f"  {R}Close failed: {err}{NC}")
-            print(f"  {DIM}If the peer is offline, a force close may be needed (contact CTO).{NC}")
-        else:
-            close_txid = (result or {}).get("closing_txid", "?")
-            print(f"  {G}✅ Close broadcast!{NC}")
-            print(f"  Closing txid: {W}{close_txid}{NC}")
-            print(f"  {DIM}Funds will return on-chain after ~1 block confirmation.{NC}")
+        TOOL_REGISTRY.execute(
+            "channel.close",
+            ChannelClosePlan(chan_point, alias, local),
+            confirmed=True,
+        )
 
     else:
         print(f"\n{W}Channel Management{NC}")
@@ -5355,9 +5417,8 @@ for _name, _description, _handler in (
     )
 
 for _name, _description, _handler in (
-    ("payment.pay", "Pay a decoded Lightning invoice", cmd_pay),
-    ("channel.open", "Open a Lightning channel", cmd_channel),
-    ("channel.close", "Close a Lightning channel", cmd_channel),
+    ("channel.open", "Open a Lightning channel", execute_channel_open),
+    ("channel.close", "Close a Lightning channel", execute_channel_close),
     ("channel.rebalance", "Rebalance liquidity between channels", cmd_rebalance),
     ("routing.fees.set", "Update Lightning routing fees", cmd_fees),
     ("magma.buy", "Create a Magma inbound liquidity purchase", cmd_magma),
@@ -5370,6 +5431,16 @@ for _name, _description, _handler in (
             handler=_handler,
         )
     )
+
+TOOL_REGISTRY.register(
+    ToolSpec(
+        name="payment.pay",
+        description="Pay a decoded Lightning invoice",
+        permission=Permission.EXPLICIT_CONFIRMATION,
+        handler=execute_pay,
+        prepare_handler=prepare_pay,
+    )
+)
 
 TOOL_REGISTRY.register(
     ToolSpec(

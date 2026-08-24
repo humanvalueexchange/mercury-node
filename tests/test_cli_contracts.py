@@ -56,6 +56,37 @@ class CliParserDispatchTests(unittest.TestCase):
         self.assertEqual(plan.amount_sat, 1000)
         lncli.assert_called_once_with("walletbalance")
 
+    def test_payment_prepare_decodes_without_broadcast(self):
+        with patch.object(
+            cli,
+            "lncli",
+            return_value=(
+                {
+                    "num_satoshis": "2500",
+                    "destination": "02" + "a" * 64,
+                    "description": "test",
+                },
+                None,
+            ),
+        ) as lncli:
+            plan = cli.TOOL_REGISTRY.prepare(
+                "payment.pay", type("Args", (), {"bolt11": "lnbc-test"})()
+            )
+
+        self.assertIsInstance(plan, cli.PayPlan)
+        self.assertEqual((plan.amount_sat, plan.memo), (2500, "test"))
+        lncli.assert_called_once_with("decodepayreq", "lnbc-test")
+
+    def test_channel_write_tools_execute_only_approved_plans(self):
+        self.assertIs(
+            cli.TOOL_REGISTRY.get("channel.open").handler,
+            cli.execute_channel_open,
+        )
+        self.assertIs(
+            cli.TOOL_REGISTRY.get("channel.close").handler,
+            cli.execute_channel_close,
+        )
+
     def test_status_parser_dispatches_with_ai_flag(self):
         with patch.object(cli, "cmd_status_tool") as handler, patch.object(
             sys, "argv", ["mercury", "status", "--ai"]
