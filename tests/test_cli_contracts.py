@@ -21,6 +21,28 @@ cli = load_cli()
 
 
 class CliParserDispatchTests(unittest.TestCase):
+    def test_write_tools_are_confirmation_gated(self):
+        for name in (
+            "payment.pay",
+            "bitcoin.send",
+            "channel.open",
+            "channel.close",
+            "channel.rebalance",
+            "routing.fees.set",
+            "magma.buy",
+        ):
+            self.assertEqual(
+                cli.TOOL_REGISTRY.get(name).permission,
+                cli.Permission.EXPLICIT_CONFIRMATION,
+            )
+
+    def test_operation_amount_limits_are_enforced(self):
+        self.assertEqual(cli.validate_amount(5000, "test", minimum=100), 5000)
+        with self.assertRaises(ValueError):
+            cli.validate_amount(99, "test", minimum=100)
+        with self.assertRaises(ValueError):
+            cli.validate_amount(cli.MAX_OPERATION_SAT + 1, "test")
+
     def test_status_parser_dispatches_with_ai_flag(self):
         with patch.object(cli, "cmd_status_tool") as handler, patch.object(
             sys, "argv", ["mercury", "status", "--ai"]

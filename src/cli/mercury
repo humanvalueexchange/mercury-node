@@ -49,6 +49,9 @@ OLLAMA_URL = CONFIG.ollama_url
 LOCAL_LLM_URL = CONFIG.local_llm_url
 LOCAL_LLM_MODEL = str(CONFIG.local_llm_model)
 OLLAMA_MODEL = CONFIG.ollama_model
+MAX_OPERATION_SAT = int(os.getenv("MERCURY_MAX_OPERATION_SAT", "100000000"))
+MAX_FEE_RATE_PPM = int(os.getenv("MERCURY_MAX_FEE_RATE_PPM", "100000"))
+AUDIT_LOG = Path(os.getenv("MERCURY_AUDIT_LOG", str(Path.home() / ".mercury" / "audit.log")))
 
 # ── Node Directory ────────────────────────────────────────────────────────────
 # Well-known routing nodes — referenced by short alias in `channel open` and `nodes`
@@ -267,6 +270,53 @@ def get_uptime():
             return f"{m}m"
     except Exception:
         return "unknown"
+
+
+def validate_amount(amount, operation, *, minimum=1):
+    """Validate a satoshi amount before a state-changing operation."""
+    try:
+        value = int(amount)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{operation} amount must be an integer") from exc
+    if value < minimum:
+        raise ValueError(f"{operation} amount must be at least {minimum:,} SAT")
+    if value > MAX_OPERATION_SAT:
+        raise ValueError(
+            f"{operation} amount exceeds safety limit of {MAX_OPERATION_SAT:,} SAT"
+        )
+    return value
+
+
+def audit_write(operation, details):
+    """Record a non-sensitive state-changing action before execution."""
+    try:
+        AUDIT_LOG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        AUDIT_LOG.touch(mode=0o600, exist_ok=True)
+        AUDIT_LOG.chmod(0o600)
+        with AUDIT_LOG.open("a", encoding="utf-8") as audit:
+            audit.write(
+                f"{datetime.now(timezone.utc).isoformat()} "
+                f"operation={operation} {details}\n"
+            )
+    except OSError as exc:
+        print(f"{R}Safety audit could not be recorded: {exc}{NC}")
+        return False
+    return True
+
+
+def confirm_write(operation, summary):
+    """Require explicit operator approval and an auditable approval record."""
+    print(f"\n  {Y}WARNING: {operation} changes node or wallet state.{NC}")
+    print(f"  {summary}")
+    try:
+        answer = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  {DIM}Cancelled.{NC}")
+        return False
+    if answer != "yes":
+        print(f"  {DIM}Aborted.{NC}")
+        return False
+    return audit_write(operation, summary.replace("\n", " "))
 
 
 # ── Formatters ────────────────────────────────────────────────────────────────
@@ -729,14 +779,16 @@ def cmd_pay(args):
     print(f"  Amount:  {W}{fmt_sat(decoded.get('num_satoshis', 0))}{NC}")
     print(f"  Payee:   {DIM}{decoded.get('destination', 'unknown')}{NC}")
     print(f"  Memo:    {decoded.get('description', '') or '(none)'}")
-    print(f"\n  {Y}⚠  About to send payment. Confirm? [y/N]{NC} ", end="", flush=True)
     try:
-        answer = input()
-    except (EOFError, KeyboardInterrupt):
-        print(f"\n  {Y}Cancelled.{NC}\n")
+        amount_sat = validate_amount(decoded.get("num_satoshis", 0), "Payment")
+    except ValueError as exc:
+        print(f"  {R}{exc}{NC}\n")
         return
-    if answer.strip().lower() != "y":
-        print(f"  {Y}Cancelled.{NC}\n")
+    if not confirm_write(
+        "lightning payment",
+        f"amount={amount_sat} destination={decoded.get('destination', 'unknown')}",
+    ):
+        print()
         return
 
     print(f"  {DIM}Sending...{NC}")
@@ -760,7 +812,11 @@ def cmd_pay(args):
 def cmd_send(args):
     """Send on-chain Bitcoin."""
     address = args.address
-    amount_sat = args.amount
+    try:
+        amount_sat = validate_amount(args.amount, "On-chain payment")
+    except ValueError as exc:
+        print(f"  {R}{exc}{NC}\n")
+        return
 
     print(f"\n{W}On-Chain Bitcoin Payment{NC}")
     print(f"{DIM}{'─' * 55}{NC}")
@@ -788,14 +844,11 @@ def cmd_send(args):
 
     print(f"  Remaining: ~{fmt_sat(confirmed - total_cost)}")
 
-    print(f"\n  {Y}⚠  Send {fmt_sat(amount_sat)} on-chain? [y/N]{NC} ", end="", flush=True)
-    try:
-        answer = input()
-    except (EOFError, KeyboardInterrupt):
-        print(f"\n  {Y}Cancelled.{NC}\n")
-        return
-    if answer.strip().lower() != "y":
-        print(f"  {Y}Cancelled.{NC}\n")
+    if not confirm_write(
+        "on-chain payment",
+        f"amount={amount_sat} address={address} estimated_fee={est_fee_sat}",
+    ):
+        print()
         return
 
     print(f"  {DIM}Broadcasting transaction...{NC}")
@@ -1639,7 +1692,11 @@ def cmd_magma(args):
             target = recs[0]
 
         alias    = target.get("node_alias", "unknown")
-        size     = int(target.get("size_sat", 0))
+        try:
+            size = validate_amount(target.get("size_sat", 0), "Magma channel", minimum=20_000)
+        except ValueError as exc:
+            print(f"  {R}{exc}{NC}\n")
+            return
         fee_fix  = int(target.get("fee_fixed_sat", 0))
         ppm      = int(target.get("fee_rate_ppm", target.get("fee_variable_ppm", 0)))
         offer_id = target.get("offer_id", target.get("id", ""))
@@ -1649,18 +1706,11 @@ def cmd_magma(args):
         print(f"  Channel size: {W}{fmt_sat(size)}{NC}")
         print(f"  Fee:          {Y}{fmt_sat(total_fee)}{NC}  ({fee_fix} base + {fee_var} variable)")
         print(f"  Offer ID:     {DIM}{offer_id}{NC}\n")
-        print(f"  {Y}⚠  This will spend {fmt_sat(total_fee)} from your wallet.{NC}")
-
-        # Confirm
-        try:
-            confirm = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n  {DIM}Cancelled.{NC}")
-            print(f"{DIM}{'─' * 55}{NC}\n")
-            return
-
-        if confirm != "yes":
-            print(f"  {DIM}Aborted.{NC}")
+        print(f"  {Y}This will spend {fmt_sat(total_fee)} from your wallet.{NC}")
+        if not confirm_write(
+            "Magma channel purchase",
+            f"offer={offer_id} node={alias} channel_size={size} fee={total_fee}",
+        ):
             print(f"{DIM}{'─' * 55}{NC}\n")
             return
 
@@ -1770,14 +1820,13 @@ def cmd_channel(args):
             return
 
         try:
-            sat = int(str(amount).replace("_","").replace(",",""))
+            sat = validate_amount(
+                str(amount).replace("_", "").replace(",", ""),
+                "Channel open",
+                minimum=20_000,
+            )
         except ValueError:
-            print(f"  {R}Invalid amount: {amount}{NC}")
-            print(f"{DIM}{'─' * 55}{NC}\n")
-            return
-
-        if sat < 20000:
-            print(f"  {R}Minimum channel size is 20,000 SAT.{NC}")
+            print(f"  {R}Invalid or unsafe amount: {amount}{NC}")
             print(f"{DIM}{'─' * 55}{NC}\n")
             return
 
@@ -1811,16 +1860,11 @@ def cmd_channel(args):
         print(f"  Peer:   {W}{display_name}{NC}")
         print(f"  Amount: {W}{fmt_sat(sat)}{NC}")
         print(f"  On-chain balance after open: ~{fmt_sat(usable - sat)}")
-        print(f"\n  {Y}⚠  This will open an on-chain channel (requires ~3 block confirmations).{NC}")
-
-        try:
-            confirm = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n  {DIM}Cancelled.{NC}")
-            print(f"{DIM}{'─' * 55}{NC}\n")
-            return
-        if confirm != "yes":
-            print(f"  {DIM}Aborted.{NC}")
+        print(f"\n  {Y}This will open an on-chain channel (requires ~3 block confirmations).{NC}")
+        if not confirm_write(
+            "channel open",
+            f"amount={sat} peer={display_name} pubkey={pubkey}",
+        ):
             print(f"{DIM}{'─' * 55}{NC}\n")
             return
 
@@ -1894,14 +1938,10 @@ def cmd_channel(args):
         print(f"\n  {Y}⚠  Cooperative close — your local balance ({fmt_sat(local)}) returns on-chain.{NC}")
         print(f"  {Y}⚠  This requires the peer to be online and cooperative.{NC}")
 
-        try:
-            confirm = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n  {DIM}Cancelled.{NC}")
-            print(f"{DIM}{'─' * 55}{NC}\n")
-            return
-        if confirm != "yes":
-            print(f"  {DIM}Aborted.{NC}")
+        if not confirm_write(
+            "channel close",
+            f"channel_point={chan_point} alias={alias} local_balance={local}",
+        ):
             print(f"{DIM}{'─' * 55}{NC}\n")
             return
 
@@ -2039,21 +2079,28 @@ def cmd_fees(args):
             print(f"  {DIM}Example: fees set 100          (100 ppm, 1 sat base — all channels){NC}")
             print(f"  {DIM}Example: fees set 50 500       (50 ppm, 0.5 sat base){NC}\n")
             return
+        try:
+            ppm = validate_amount(ppm, "Fee rate", minimum=0)
+            if ppm > MAX_FEE_RATE_PPM:
+                raise ValueError(
+                    f"Fee rate exceeds safety limit of {MAX_FEE_RATE_PPM:,} ppm"
+                )
+            base_msat = validate_amount(base_msat, "Base fee", minimum=0)
+        except ValueError as exc:
+            print(f"\n  {R}{exc}{NC}\n")
+            return
 
         print(f"\n{W}Update Channel Fees{NC}")
         print(f"{DIM}{'─' * 55}{NC}")
         print(f"  Base fee:  {W}{base_msat} msat{NC}  ({base_msat/1000:.3f} SAT per payment)")
         print(f"  Rate:      {W}{ppm} ppm{NC}  ({ppm/10000:.4f}% per routed SAT)")
         print(f"  Scope:     {W}{'all channels' if not chan_alias else chan_alias}{NC}")
-        print(f"\n  {Y}⚠  This updates your public routing policy on the Lightning Network.{NC}")
-
-        try:
-            confirm = input(f"  Type {W}yes{NC} to proceed: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n  {DIM}Cancelled.{NC}\n")
-            return
-        if confirm != "yes":
-            print(f"  {DIM}Aborted.{NC}\n")
+        print(f"\n  {Y}This updates your public routing policy on the Lightning Network.{NC}")
+        if not confirm_write(
+            "routing fee update",
+            f"ppm={ppm} base_msat={base_msat} scope={chan_alias or 'all channels'}",
+        ):
+            print()
             return
 
         result, err = lncli("updatechanpolicy",
@@ -2251,6 +2298,12 @@ def cmd_rebalance(args):
     """Circular channel rebalance — push local balance from full channel to empty channels."""
     amount = getattr(args, 'amount', None)
     dry_run = getattr(args, 'dry_run', False)
+    if amount is not None:
+        try:
+            amount = validate_amount(amount, "Rebalance", minimum=5_000)
+        except ValueError as exc:
+            print(f"{R}{exc}{NC}\n")
+            return
 
     print(f"\n{W}Channel Rebalance{NC}")
     print(f"{DIM}{'─' * 55}{NC}")
@@ -2358,14 +2411,11 @@ def cmd_rebalance(args):
         print(f"  {DIM}Dry run — no payment sent.{NC}\n")
         return
 
-    try:
-        confirm = input(f"  Type {W}yes{NC} to execute rebalance: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print(f"\n  {DIM}Cancelled.{NC}\n")
-        return
-
-    if confirm != "yes":
-        print(f"  {DIM}Aborted.{NC}\n")
+    if not confirm_write(
+        "channel rebalance",
+        f"amount={amount} source={source['scid_str']} sink={sink['scid_str']}",
+    ):
+        print()
         return
 
     # Progressive retry: try full amount, then halves, down to 50K minimum
@@ -5268,6 +5318,24 @@ for _name, _description, _handler in (
             name=_name,
             description=_description,
             permission=Permission.READ_ONLY,
+            handler=_handler,
+        )
+    )
+
+for _name, _description, _handler in (
+    ("payment.pay", "Pay a decoded Lightning invoice", cmd_pay),
+    ("bitcoin.send", "Send on-chain Bitcoin", cmd_send),
+    ("channel.open", "Open a Lightning channel", cmd_channel),
+    ("channel.close", "Close a Lightning channel", cmd_channel),
+    ("channel.rebalance", "Rebalance liquidity between channels", cmd_rebalance),
+    ("routing.fees.set", "Update Lightning routing fees", cmd_fees),
+    ("magma.buy", "Create a Magma inbound liquidity purchase", cmd_magma),
+):
+    TOOL_REGISTRY.register(
+        ToolSpec(
+            name=_name,
+            description=_description,
+            permission=Permission.EXPLICIT_CONFIRMATION,
             handler=_handler,
         )
     )
