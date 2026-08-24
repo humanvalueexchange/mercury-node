@@ -4817,7 +4817,7 @@ def cmd_shell(args=None):
     import shlex
 
     COMMANDS = {"status", "channels", "invoices", "sync", "peers",
-                "backup", "logs", "pay", "invoice", "charge", "deposit", "magma", "alerts", "health",
+                "backup", "logs", "pay", "invoice", "charge", "deposit", "send", "magma", "alerts", "health",
                 "rebalance", "channel", "nodes", "transactions", "fees", "payments", "routing", "version", "help", "exit", "quit", "clear", "cls", "post-share", "suggest", "generate-backlog", "generate-idea", "vote", "rank-backlog", "recommend", "tonight"}
 
     dispatch = {
@@ -4833,6 +4833,7 @@ def cmd_shell(args=None):
         "invoice":   cmd_invoice,
         "charge":    cmd_charge,
         "deposit":   cmd_deposit,
+        "send":      cmd_send,
         "magma":     cmd_magma,
         "channel":   cmd_channel,
         "nodes":     lambda args: execute_read_only_tool("node.nodes", args),
@@ -5029,6 +5030,12 @@ def cmd_shell(args=None):
                         ns.amount = int(rest[0])
                     except ValueError:
                         pass
+            elif cmd == "send":
+                if len(rest) < 2:
+                    print(f"  {Y}Usage: send <bitcoin-address> <sat>{NC}")
+                    continue
+                ns.address = rest[0]
+                ns.amount = int(rest[1])
             elif cmd == "magma":
                 ns.subcmd = rest[0] if rest else "offers"
                 ns.min_sat = 100000
@@ -5265,7 +5272,8 @@ def main():
         "invoice":  cmd_invoice,
         "charge":   cmd_charge,
         "deposit":  cmd_deposit,
-        "magma":    cmd_magma,
+        "send":     cmd_send,
+        "magma":     cmd_magma,
         "channel":  cmd_channel,
         "nodes":    cmd_nodes,
         "transactions": cmd_transactions,

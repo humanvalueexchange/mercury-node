@@ -73,6 +73,15 @@ class CliParserDispatchTests(unittest.TestCase):
         self.assertEqual(args.channel_action, "open")
         self.assertEqual((args.peer, args.amount), ("acinq", "400000"))
 
+    def test_send_parser_dispatches_address_and_amount(self):
+        with patch.object(cli, "cmd_send") as handler, patch.object(
+            sys, "argv", ["mercury", "send", "bc1qexample", "1000"]
+        ):
+            cli.main()
+
+        args = handler.call_args.args[0]
+        self.assertEqual((args.address, args.amount), ("bc1qexample", 1000))
+
     def test_magma_parser_dispatches_bounds_and_subcommand(self):
         with patch.object(cli, "cmd_magma") as handler, patch.object(
             sys,
