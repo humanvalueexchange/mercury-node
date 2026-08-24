@@ -87,6 +87,39 @@ class CliParserDispatchTests(unittest.TestCase):
             cli.execute_channel_close,
         )
 
+    def test_execution_plan_tools_have_prepare_handlers(self):
+        self.assertIs(
+            cli.TOOL_REGISTRY.get("channel.rebalance").prepare_handler,
+            cli.prepare_rebalance,
+        )
+        self.assertIs(
+            cli.TOOL_REGISTRY.get("routing.fees.set").prepare_handler,
+            cli.prepare_fees,
+        )
+        self.assertIs(
+            cli.TOOL_REGISTRY.get("magma.buy").prepare_handler,
+            cli.prepare_magma_buy,
+        )
+
+    def test_rebalance_prepare_validates_requested_amount(self):
+        args = type("Args", (), {"amount": 5000, "dry_run": True})()
+        plan = cli.TOOL_REGISTRY.prepare("channel.rebalance", args)
+        self.assertIsInstance(plan, cli.RebalancePlan)
+        with self.assertRaises(ValueError):
+            cli.TOOL_REGISTRY.prepare(
+                "channel.rebalance",
+                type("Args", (), {"amount": 4999})(),
+            )
+
+    def test_fee_prepare_validates_limits_without_lnd_call(self):
+        args = type(
+            "Args",
+            (),
+            {"fees_action": "set", "ppm": 100, "base_msat": 1000},
+        )()
+        plan = cli.TOOL_REGISTRY.prepare("routing.fees.set", args)
+        self.assertIsInstance(plan, cli.FeeUpdatePlan)
+
     def test_status_parser_dispatches_with_ai_flag(self):
         with patch.object(cli, "cmd_status_tool") as handler, patch.object(
             sys, "argv", ["mercury", "status", "--ai"]

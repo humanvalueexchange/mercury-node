@@ -1488,7 +1488,87 @@ def _agent_post(path, payload):
         return None, str(e)
 
 
+@dataclass(frozen=True)
+class FeeUpdatePlan:
+    """Validated routing-fee update awaiting operator approval."""
+
+    args: object
+
+
+@dataclass(frozen=True)
+class RebalancePlan:
+    """Validated channel rebalance request awaiting operator approval."""
+
+    args: object
+
+
+@dataclass(frozen=True)
+class MagmaBuyPlan:
+    """Validated Magma purchase request awaiting operator approval."""
+
+    args: object
+
+
+def prepare_fees(args):
+    if getattr(args, "fees_action", None) != "set":
+        raise ValueError("Fee update requires `fees set <ppm> [base_msat]`")
+    ppm = validate_amount(getattr(args, "ppm", None), "Fee rate", minimum=0)
+    if ppm > MAX_FEE_RATE_PPM:
+        raise ValueError(f"Fee rate exceeds safety limit of {MAX_FEE_RATE_PPM:,} ppm")
+    validate_amount(getattr(args, "base_msat", 1000), "Base fee", minimum=0)
+    return FeeUpdatePlan(args)
+
+
+def prepare_rebalance(args):
+    amount = getattr(args, "amount", None)
+    if amount is not None:
+        validate_amount(amount, "Rebalance", minimum=5_000)
+    return RebalancePlan(args)
+
+
+def prepare_magma_buy(args):
+    if getattr(args, "subcmd", None) != "buy":
+        raise ValueError("Magma purchase requires `magma buy`")
+    return MagmaBuyPlan(args)
+
+
+def _approved_args(args):
+    values = vars(args).copy()
+    values["_approved"] = True
+    return type("ApprovedArgs", (), values)()
+
+
+def execute_fees(plan):
+    return _cmd_fees(_approved_args(plan.args))
+
+
+def execute_rebalance(plan):
+    return _cmd_rebalance(_approved_args(plan.args))
+
+
+def execute_magma_buy(plan):
+    return _cmd_magma(_approved_args(plan.args))
+
+
 def cmd_magma(args):
+    if getattr(args, "subcmd", None) == "buy" and not getattr(args, "_approved", False):
+        try:
+            plan = TOOL_REGISTRY.prepare("magma.buy", args)
+        except (RuntimeError, ValueError) as exc:
+            print(f"{R}{exc}{NC}\n")
+            return
+        if not confirm_write(
+            "Magma channel purchase",
+            f"node={getattr(args, 'node', None) or 'recommended offer'}",
+        ):
+            print()
+            return
+        TOOL_REGISTRY.execute("magma.buy", plan, confirmed=True)
+        return
+    return _cmd_magma(args)
+
+
+def _cmd_magma(args):
     subcmd = getattr(args, 'subcmd', None) or 'offers'
 
     if subcmd == 'offers':
@@ -1759,7 +1839,7 @@ def cmd_magma(args):
         print(f"  Fee:          {Y}{fmt_sat(total_fee)}{NC}  ({fee_fix} base + {fee_var} variable)")
         print(f"  Offer ID:     {DIM}{offer_id}{NC}\n")
         print(f"  {Y}This will spend {fmt_sat(total_fee)} from your wallet.{NC}")
-        if not confirm_write(
+        if not getattr(args, "_approved", False) and not confirm_write(
             "Magma channel purchase",
             f"offer={offer_id} node={alias} channel_size={size} fee={total_fee}",
         ):
@@ -2151,6 +2231,25 @@ def cmd_transactions(args):
 
 
 def cmd_fees(args):
+    if getattr(args, "fees_action", None) == "set" and not getattr(args, "_approved", False):
+        try:
+            plan = TOOL_REGISTRY.prepare("routing.fees.set", args)
+        except (RuntimeError, ValueError) as exc:
+            print(f"{R}{exc}{NC}\n")
+            return
+        if not confirm_write(
+            "routing fee update",
+            f"ppm={args.ppm} base_msat={getattr(args, 'base_msat', 1000)} "
+            f"scope={getattr(args, 'channel', None) or 'all channels'}",
+        ):
+            print()
+            return
+        TOOL_REGISTRY.execute("routing.fees.set", plan, confirmed=True)
+        return
+    return _cmd_fees(args)
+
+
+def _cmd_fees(args):
     """Show channel fee policy and earnings. Optionally update fees."""
     subcmd = getattr(args, 'fees_action', None)
 
@@ -2182,7 +2281,7 @@ def cmd_fees(args):
         print(f"  Rate:      {W}{ppm} ppm{NC}  ({ppm/10000:.4f}% per routed SAT)")
         print(f"  Scope:     {W}{'all channels' if not chan_alias else chan_alias}{NC}")
         print(f"\n  {Y}This updates your public routing policy on the Lightning Network.{NC}")
-        if not confirm_write(
+        if not getattr(args, "_approved", False) and not confirm_write(
             "routing fee update",
             f"ppm={ppm} base_msat={base_msat} scope={chan_alias or 'all channels'}",
         ):
@@ -2380,7 +2479,7 @@ def cmd_routing(args):
         _ai_insight(ctx, "routing")
 
 
-def cmd_rebalance(args):
+def _cmd_rebalance(args):
     """Circular channel rebalance — push local balance from full channel to empty channels."""
     amount = getattr(args, 'amount', None)
     dry_run = getattr(args, 'dry_run', False)
@@ -2497,7 +2596,7 @@ def cmd_rebalance(args):
         print(f"  {DIM}Dry run — no payment sent.{NC}\n")
         return
 
-    if not confirm_write(
+    if not getattr(args, "_approved", False) and not confirm_write(
         "channel rebalance",
         f"amount={amount} source={source['scid_str']} sink={sink['scid_str']}",
     ):
@@ -2577,6 +2676,24 @@ def cmd_rebalance(args):
                f"{source['local']} SAT). Sink: {sink['alias']} ({sink['remote']} SAT inbound). "
                f"Channel age: {source['lifetime']//60} min.")
         _ai_insight(ctx, "rebalance")
+
+
+def cmd_rebalance(args):
+    """Prepare and execute an approved channel rebalance request."""
+    try:
+        plan = TOOL_REGISTRY.prepare("channel.rebalance", args)
+    except (RuntimeError, ValueError) as exc:
+        print(f"{R}{exc}{NC}\n")
+        return
+    if getattr(args, "dry_run", False):
+        return _cmd_rebalance(args)
+    if not confirm_write(
+        "channel rebalance",
+        f"amount={getattr(args, 'amount', None) or 'auto'}",
+    ):
+        print()
+        return
+    TOOL_REGISTRY.execute("channel.rebalance", plan, confirmed=True)
 
 
 def _build_node_context():
@@ -5419,9 +5536,9 @@ for _name, _description, _handler in (
 for _name, _description, _handler in (
     ("channel.open", "Open a Lightning channel", execute_channel_open),
     ("channel.close", "Close a Lightning channel", execute_channel_close),
-    ("channel.rebalance", "Rebalance liquidity between channels", cmd_rebalance),
-    ("routing.fees.set", "Update Lightning routing fees", cmd_fees),
-    ("magma.buy", "Create a Magma inbound liquidity purchase", cmd_magma),
+    ("channel.rebalance", "Rebalance liquidity between channels", execute_rebalance),
+    ("routing.fees.set", "Update Lightning routing fees", execute_fees),
+    ("magma.buy", "Create a Magma inbound liquidity purchase", execute_magma_buy),
 ):
     TOOL_REGISTRY.register(
         ToolSpec(
@@ -5429,6 +5546,11 @@ for _name, _description, _handler in (
             description=_description,
             permission=Permission.EXPLICIT_CONFIRMATION,
             handler=_handler,
+            prepare_handler={
+                "channel.rebalance": prepare_rebalance,
+                "routing.fees.set": prepare_fees,
+                "magma.buy": prepare_magma_buy,
+            }.get(_name),
         )
     )
 
