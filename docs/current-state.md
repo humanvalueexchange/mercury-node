@@ -67,6 +67,14 @@ user `btcpay`. LND is configured with an automated wallet-unlock password file u
 | Mercury model inventory | Phi-3.5-mini, Qwen2.5-3B, Qwen3.8-2B, Qwen3.8-4B |
 | Extra service | `hve-lifeos.service` |
 
+The agent binds to localhost by default. If the authenticated backup endpoint is enabled,
+`MERCURY_BACKUP_TOKEN` must be supplied through the root-readable
+`/etc/mercury/agent.env` systemd environment file; the token is never stored in this
+repository.
+
+Static channel backups are stored under `/var/lib/lnd/backups` and are intended to be
+owned by `lnd` with restrictive permissions.
+
 All observed services were active at snapshot time:
 
 ```text

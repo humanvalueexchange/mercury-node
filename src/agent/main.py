@@ -19,6 +19,7 @@ Node operations are READ-ONLY — it never signs transactions or moves funds.
 Magma read access is anonymous — no API key required to start.
 """
 
+import hmac
 import json
 import os
 import subprocess
@@ -27,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, Header, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
     import httpx
@@ -38,7 +39,8 @@ MAGMA_GRAPHQL = "https://magma.amboss.tech/graphql"
 MAGMA_API_KEY = os.getenv("MAGMA_API_KEY", "")  # optional — anonymous access works without it
 LND_DIR = "/var/lib/lnd"
 LND_USER = "lnd"
-BACKUP_DIR = "/var/lib/mercury/backups"
+BACKUP_DIR = "/var/lib/lnd/backups"
+BACKUP_TOKEN = os.getenv("MERCURY_BACKUP_TOKEN", "")
 AGENT_VERSION = "0.5.5"
 
 app = FastAPI(
@@ -49,9 +51,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
+    allow_origins=[origin for origin in os.getenv("MERCURY_CORS_ORIGINS", "").split(",") if origin],
+    allow_methods=["GET"],
+    allow_headers=[],
 )
 
 # ── LND wrapper ───────────────────────────────────────────────────────────────
@@ -263,13 +265,22 @@ def get_peers():
 
 
 @app.post("/api/backup")
-def trigger_backup():
+def trigger_backup(x_mercury_backup_token: Optional[str] = Header(default=None)):
+    if not BACKUP_TOKEN:
+        raise HTTPException(status_code=503, detail="Backup API is not configured")
+    if not x_mercury_backup_token or not hmac.compare_digest(
+        x_mercury_backup_token, BACKUP_TOKEN
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     os.makedirs(BACKUP_DIR, exist_ok=True)
+    os.chmod(BACKUP_DIR, 0o700)
     ts = datetime.now().strftime("%Y%m%d-%H%M")
     path = f"{BACKUP_DIR}/channels-{ts}.bak"
     data = lncli("exportchanbackup", "--all")
-    with open(path, "w") as f:
+    with open(path, "w", opener=lambda p, flags: os.open(p, flags, 0o600)) as f:
         json.dump(data, f)
+    os.chmod(path, 0o600)
     return {"status": "ok", "path": path, "ts": ts}
 
 
@@ -281,6 +292,8 @@ async def magma_query(query: str, variables: dict = None):
     headers = {"Content-Type": "application/json"}
     if MAGMA_API_KEY:
         headers["Authorization"] = f"Bearer {MAGMA_API_KEY}"
+    if MAGMA_API_KEY:
+        headers["Authorization"] = MAGMA_API_KEY
     payload = {"query": query}
     if variables:
         payload["variables"] = variables
@@ -450,7 +463,7 @@ async def get_magma_recommendations():
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
+        host=os.getenv("MERCURY_AGENT_HOST", "127.0.0.1"),
         port=8088,
         log_level="info",
         access_log=True,

@@ -341,14 +341,29 @@ def cmd_peers(args):
 
 def cmd_backup(args):
     ts = datetime.now().strftime("%Y%m%d-%H%M")
-    path = f"/var/lib/mercury/backups/channels-{ts}.bak"
-    os.makedirs("/var/lib/mercury/backups", exist_ok=True)
+    backup_dir = "/var/lib/lnd/backups"
+    path = f"{backup_dir}/channels-{ts}.bak"
     data, err = lncli("exportchanbackup", "--all")
     if err:
         print(f"{R}Backup failed: {err}{NC}")
         return
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    payload = json.dumps(data, indent=2).encode()
+    try:
+        subprocess.run(
+            ["sudo", "-u", LND_USER, "install", "-d", "-m", "700", backup_dir],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        subprocess.run(
+            ["sudo", "-u", LND_USER, "tee", path],
+            input=payload, check=True, capture_output=True, timeout=10,
+        )
+        subprocess.run(
+            ["sudo", "-u", LND_USER, "chmod", "600", path],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"{R}Backup failed while securing the file: {e}{NC}")
+        return
     print(f"{G}✅ Channel backup saved:{NC} {path}")
     print(f"{DIM}Store this file off-device (DGX Spark or Trezor USB).{NC}\n")
 
@@ -365,9 +380,16 @@ def cmd_logs(args):
 
 def cmd_pay(args):
     bolt11 = args.bolt11
+    decoded, decode_err = lncli("decodepayreq", bolt11)
+    if decode_err or not decoded:
+        print(f"{R}Invalid Lightning invoice: {decode_err or 'could not decode'}{NC}\n")
+        return
     print(f"\n{W}Lightning Payment{NC}")
     print(f"{DIM}{'─' * 55}{NC}")
     print(f"  Invoice: {DIM}{bolt11[:60]}...{NC}")
+    print(f"  Amount:  {W}{fmt_sat(decoded.get('num_satoshis', 0))}{NC}")
+    print(f"  Payee:   {DIM}{decoded.get('destination', 'unknown')}{NC}")
+    print(f"  Memo:    {decoded.get('description', '') or '(none)'}")
     print(f"\n  {Y}⚠  About to send payment. Confirm? [y/N]{NC} ", end="", flush=True)
     try:
         answer = input()

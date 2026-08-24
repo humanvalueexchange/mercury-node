@@ -11,6 +11,7 @@ Type=simple
 User=lnd
 Group=lnd
 WorkingDirectory=/opt/mercury/agent
+EnvironmentFile=-/etc/mercury/agent.env
 ExecStart=/opt/mercury/venv/bin/python main.py
 Restart=on-failure
 RestartSec=10

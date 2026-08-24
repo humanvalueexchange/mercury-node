@@ -42,3 +42,14 @@ Mercury Node's threat model prioritizes:
 2. **Fund safety** — the Mercury agent has read-only access; it cannot move funds autonomously above the configured threshold
 3. **Node availability** — the Bitcoin stack must survive agent crashes
 4. **Network security** — LND gRPC and BTCPay are not exposed to the internet by default
+
+## Static Channel Backups
+
+Static channel backups are sensitive recovery material and must be treated as secrets.
+Mercury stores them under `/var/lib/lnd/backups` with a `0700` directory and `0600` file
+permissions, owned by the `lnd` service account.
+
+The HTTP backup endpoint is disabled unless `MERCURY_BACKUP_TOKEN` is configured through
+the root-owned `/etc/mercury/agent.env` file. The agent binds to localhost by default;
+do not expose port 8088 directly to the internet. Encrypt backups before copying them
+off-device, and keep the wallet seed separate from the backups.
