@@ -74,6 +74,43 @@ agent = load_agent()
 
 
 class AgentShapingTests(unittest.TestCase):
+    def test_tool_catalog_exposes_write_permissions(self):
+        result = agent.get_tools()
+        tools = {tool["name"]: tool for tool in result["tools"]}
+        self.assertEqual(
+            tools["payment.pay"]["permission"],
+            "explicit_confirmation",
+        )
+        self.assertIn("channel.rebalance", tools)
+
+    def test_prepare_payment_creates_expiring_plan_without_payment(self):
+        decoded = {
+            "num_satoshis": "2500",
+            "destination": "02" + "a" * 64,
+            "description": "agent test",
+        }
+        with patch.object(agent, "lncli", return_value=decoded) as lncli:
+            result = agent.prepare_tool(
+                "payment.pay",
+                {"bolt11": "lnbc-test"},
+            )
+
+        self.assertEqual(result["plan"]["amount_sat"], 2500)
+        self.assertTrue(result["requires_confirmation"])
+        lncli.assert_called_once_with("decodepayreq", "lnbc-test")
+
+    def test_execute_requires_confirmation_and_does_not_broadcast(self):
+        prepared = agent.prepare_tool(
+            "channel.rebalance",
+            {"amount_sat": 5000},
+        )
+        with self.assertRaises(agent.HTTPException) as raised:
+            agent.execute_tool(
+                "channel.rebalance",
+                {"plan_token": prepared["plan_token"], "confirmed": False},
+            )
+        self.assertEqual(raised.exception.status_code, 400)
+
     def test_channels_shapes_active_pending_and_summary_balances(self):
         active = {
             "channels": [

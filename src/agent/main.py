@@ -26,10 +26,12 @@ Magma read access is anonymous — no API key required to start.
 import hmac
 import json
 import os
+import secrets
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Callable, Optional
 
 try:
     from fastapi import FastAPI, Header, HTTPException
@@ -47,6 +49,135 @@ BACKUP_DIR = "/var/lib/mercury/backups"
 BACKUP_TOKEN = os.getenv("MERCURY_BACKUP_TOKEN", "")
 ORDERS_FILE = "/var/lib/mercury/magma_orders.json"
 AGENT_VERSION = "0.5.5"
+PLAN_TTL_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class AgentTool:
+    name: str
+    description: str
+    permission: str
+    prepare: Callable[[dict[str, Any]], dict[str, Any]]
+
+
+class AgentToolRegistry:
+    """Agent-facing catalog for the same prepare/confirm boundary as the CLI."""
+
+    def __init__(self) -> None:
+        self._tools: dict[str, AgentTool] = {}
+        self._plans: dict[str, tuple[float, str, dict[str, Any]]] = {}
+
+    def register(self, tool: AgentTool) -> None:
+        if tool.name in self._tools:
+            raise ValueError(f"Tool already registered: {tool.name}")
+        self._tools[tool.name] = tool
+
+    def list(self) -> list[dict[str, str]]:
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "permission": tool.permission,
+            }
+            for tool in self._tools.values()
+        ]
+
+    def prepare(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            tool = self._tools[name]
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown Mercury tool: {name}") from exc
+        plan = tool.prepare(payload)
+        token = secrets.token_urlsafe(24)
+        self._plans[token] = (time.time() + PLAN_TTL_SECONDS, name, plan)
+        return {
+            "tool": name,
+            "plan_token": token,
+            "expires_in": PLAN_TTL_SECONDS,
+            "requires_confirmation": tool.permission != "read_only",
+            "plan": plan,
+        }
+
+    def consume(self, name: str, token: str, confirmed: bool) -> dict[str, Any]:
+        entry = self._plans.get(token)
+        if not entry:
+            raise HTTPException(status_code=409, detail="Plan token is invalid or already used")
+        expires, planned_name, plan = entry
+        if expires < time.time():
+            raise HTTPException(status_code=409, detail="Plan token has expired")
+        if planned_name != name:
+            raise HTTPException(status_code=409, detail="Plan token does not match requested tool")
+        if not confirmed:
+            raise HTTPException(status_code=400, detail="Explicit confirmation is required")
+        self._plans.pop(token, None)
+        raise HTTPException(
+            status_code=409,
+            detail="Agent execution is confirmation-gated; approve this plan through the Mercury CLI",
+        )
+
+
+def _required(payload: dict[str, Any], key: str) -> Any:
+    value = payload.get(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise HTTPException(status_code=422, detail=f"{key} is required")
+    return value
+
+
+def _bounded_int(payload: dict[str, Any], key: str, minimum: int = 0, maximum: int = 100_000_000) -> int:
+    try:
+        value = int(_required(payload, key))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"{key} must be an integer")
+    if value < minimum or value > maximum:
+        raise HTTPException(status_code=422, detail=f"{key} must be between {minimum} and {maximum}")
+    return value
+
+
+def _prepare_payment(payload: dict[str, Any]) -> dict[str, Any]:
+    invoice = str(_required(payload, "bolt11")).strip()
+    decoded = lncli("decodepayreq", invoice)
+    return {
+        "bolt11": invoice,
+        "amount_sat": int(decoded.get("num_satoshis", 0)),
+        "destination": decoded.get("destination", "unknown"),
+        "memo": decoded.get("description", "") or "",
+    }
+
+
+def _prepare_rebalance(payload: dict[str, Any]) -> dict[str, Any]:
+    amount = payload.get("amount_sat")
+    if amount is not None:
+        amount = _bounded_int(payload, "amount_sat", minimum=5_000)
+    return {"amount_sat": amount, "dry_run": bool(payload.get("dry_run", False))}
+
+
+def _prepare_fees(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ppm": _bounded_int(payload, "ppm", maximum=100_000),
+        "base_msat": _bounded_int(payload, "base_msat", maximum=100_000_000),
+        "channel": payload.get("channel"),
+    }
+
+
+def _prepare_channel_open(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "peer": str(_required(payload, "peer")).strip(),
+        "amount_sat": _bounded_int(payload, "amount_sat", minimum=20_000),
+    }
+
+
+def _prepare_channel_close(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"channel_point": str(_required(payload, "channel_point")).strip()}
+
+
+def _prepare_magma_buy(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "offer_id": str(_required(payload, "offer_id")).strip(),
+        "size_sat": _bounded_int(payload, "size_sat", minimum=20_000),
+    }
+
+
+AGENT_TOOLS = AgentToolRegistry()
 
 app = FastAPI(
     title="Mercury Agent API",
@@ -122,11 +253,43 @@ def get_uptime() -> str:
         return "unknown"
 
 
+# Agent and CLI share these names and the same explicit write boundary.
+for _tool in (
+    AgentTool("payment.pay", "Pay a Lightning invoice", "explicit_confirmation", _prepare_payment),
+    AgentTool("channel.open", "Open a Lightning channel", "explicit_confirmation", _prepare_channel_open),
+    AgentTool("channel.close", "Close a Lightning channel", "explicit_confirmation", _prepare_channel_close),
+    AgentTool("channel.rebalance", "Rebalance liquidity between channels", "explicit_confirmation", _prepare_rebalance),
+    AgentTool("routing.fees.set", "Update Lightning routing fees", "explicit_confirmation", _prepare_fees),
+    AgentTool("magma.buy", "Purchase inbound Magma liquidity", "explicit_confirmation", _prepare_magma_buy),
+):
+    AGENT_TOOLS.register(_tool)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
     return {"status": "ok", "version": AGENT_VERSION, "ts": int(time.time())}
+
+
+@app.get("/api/tools")
+def get_tools():
+    """List agent tools and their execution permissions."""
+    return {"tools": AGENT_TOOLS.list()}
+
+
+@app.post("/api/tools/{name}/prepare")
+def prepare_tool(name: str, payload: dict[str, Any]):
+    """Build a short-lived write plan without broadcasting or spending."""
+    return AGENT_TOOLS.prepare(name, payload)
+
+
+@app.post("/api/tools/{name}/execute")
+def execute_tool(name: str, payload: dict[str, Any]):
+    """Consume a plan token; write execution remains explicitly CLI-approved."""
+    token = str(payload.get("plan_token", ""))
+    confirmed = bool(payload.get("confirmed", False))
+    AGENT_TOOLS.consume(name, token, confirmed)
 
 
 @app.get("/api/status")
