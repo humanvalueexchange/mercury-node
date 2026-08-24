@@ -509,6 +509,8 @@ def cmd_channels(args):
         _ai_insight(ctx, "channels")
 
 
+def cmd_invoices(args):
+    """Display recent Lightning invoices."""
     # Parse filter flags
     show_recent = getattr(args, 'recent', False)
     show_pending = getattr(args, 'pending', False)
@@ -4759,7 +4761,7 @@ def cmd_shell(args=None):
     dispatch = {
         "status":    cmd_status,
         "channels":  cmd_channels,
-        "invoices":  cmd_invoice,
+        "invoices":  cmd_invoices,
         "sync":      cmd_sync,
         "peers":     cmd_peers,
         "backup":    cmd_backup,
