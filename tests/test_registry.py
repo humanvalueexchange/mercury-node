@@ -70,6 +70,25 @@ class ToolRegistryTests(unittest.TestCase):
         registry.execute("channel.prepare", None, confirmed=True)
         self.assertTrue(called)
 
+    def test_prepare_builds_plan_without_executing_handler(self):
+        executed = []
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(
+                "bitcoin.send",
+                "Send",
+                Permission.EXPLICIT_CONFIRMATION,
+                lambda plan: executed.append(plan),
+                prepare_handler=lambda args: {"amount": args["amount"]},
+            )
+        )
+
+        plan = registry.prepare("bitcoin.send", {"amount": 1000, "address": "bc1q"})
+        self.assertEqual(plan, {"amount": 1000})
+        self.assertEqual(executed, [])
+        registry.execute("bitcoin.send", plan, confirmed=True)
+        self.assertEqual(executed, [plan])
+
 
 if __name__ == "__main__":
     unittest.main()

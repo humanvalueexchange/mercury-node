@@ -43,6 +43,19 @@ class CliParserDispatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cli.validate_amount(cli.MAX_OPERATION_SAT + 1, "test")
 
+    def test_send_prepare_builds_plan_without_broadcast(self):
+        with patch.object(
+            cli, "lncli", return_value=({"confirmed_balance": "5000"}, None)
+        ) as lncli:
+            plan = cli.TOOL_REGISTRY.prepare(
+                "bitcoin.send",
+                type("Args", (), {"address": "bc1qexample", "amount": 1000})(),
+            )
+
+        self.assertIsInstance(plan, cli.SendPlan)
+        self.assertEqual(plan.amount_sat, 1000)
+        lncli.assert_called_once_with("walletbalance")
+
     def test_status_parser_dispatches_with_ai_flag(self):
         with patch.object(cli, "cmd_status_tool") as handler, patch.object(
             sys, "argv", ["mercury", "status", "--ai"]

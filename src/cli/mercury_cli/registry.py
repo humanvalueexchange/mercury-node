@@ -26,6 +26,7 @@ class ToolSpec:
     permission: Permission
     handler: Callable[[Any], Any]
     input_schema: Optional[Mapping[str, Any]] = None
+    prepare_handler: Optional[Callable[[Any], Any]] = None
 
 
 class ToolRegistry:
@@ -55,3 +56,10 @@ class ToolRegistry:
                 f"Tool requires approval: {tool.name} ({tool.permission.value})"
             )
         return tool.handler(args)
+
+    def prepare(self, name: str, args: Any) -> Any:
+        """Build a validated operation plan without executing the tool."""
+        tool = self.get(name)
+        if tool.prepare_handler is None:
+            return args
+        return tool.prepare_handler(args)

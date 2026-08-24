@@ -38,6 +38,7 @@ try:
 except ImportError:
     readline = None  # readline not available on this system
 from datetime import datetime, timezone
+from dataclasses import dataclass
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MERCURY_VERSION = "0.10.0"
@@ -317,6 +318,56 @@ def confirm_write(operation, summary):
         print(f"  {DIM}Aborted.{NC}")
         return False
     return audit_write(operation, summary.replace("\n", " "))
+
+
+@dataclass(frozen=True)
+class SendPlan:
+    """Validated on-chain payment plan awaiting operator approval."""
+
+    address: str
+    amount_sat: int
+    fee_rate_sat_vbyte: int
+    estimated_fee_sat: int
+    confirmed_balance_sat: int
+
+
+def prepare_send(args):
+    """Validate and price an on-chain send without broadcasting it."""
+    address = str(args.address).strip()
+    if not address:
+        raise ValueError("On-chain payment address is required")
+    amount_sat = validate_amount(args.amount, "On-chain payment")
+    wallet, err = lncli("walletbalance")
+    if err or not wallet:
+        raise RuntimeError(f"Could not read wallet balance: {err or 'empty response'}")
+    confirmed = int(wallet.get("confirmed_balance", 0))
+    fee_rate = 10
+    estimated_fee = fee_rate * 141
+    total_cost = amount_sat + estimated_fee
+    if confirmed < total_cost:
+        raise ValueError(
+            f"Insufficient funds: need {fmt_sat(total_cost - confirmed)} more"
+        )
+    return SendPlan(address, amount_sat, fee_rate, estimated_fee, confirmed)
+
+
+def execute_send(plan):
+    """Broadcast a previously approved on-chain payment plan."""
+    result, err = lncli(
+        "sendcoins",
+        f"--addr={plan.address}",
+        f"--amt={plan.amount_sat}",
+        f"--sat_per_vbyte={plan.fee_rate_sat_vbyte}",
+        timeout=30,
+    )
+    if err:
+        print(f"  {R}Transaction failed: {err}{NC}\n")
+        return
+    txid = (result or {}).get("txid", "")
+    print(f"  {G}Transaction broadcast!{NC}")
+    print(f"  TXID: {C}{txid}{NC}")
+    print(f"\n  {DIM}Waiting for confirmation (10-60 min typical){NC}")
+    print(f"{DIM}{'─' * 55}{NC}\n")
 
 
 # ── Formatters ────────────────────────────────────────────────────────────────
@@ -811,58 +862,31 @@ def cmd_pay(args):
 
 def cmd_send(args):
     """Send on-chain Bitcoin."""
-    address = args.address
     try:
-        amount_sat = validate_amount(args.amount, "On-chain payment")
-    except ValueError as exc:
-        print(f"  {R}{exc}{NC}\n")
+        plan = TOOL_REGISTRY.prepare("bitcoin.send", args)
+    except (RuntimeError, ValueError) as exc:
+        print(f"{R}{exc}{NC}\n")
         return
 
     print(f"\n{W}On-Chain Bitcoin Payment{NC}")
     print(f"{DIM}{'─' * 55}{NC}")
-    print(f"  Address: {DIM}{address[:40]}...{NC}")
-    print(f"  Amount:  {W}{fmt_sat(amount_sat)}{NC}")
-
-    # Estimate fee
+    print(f"  Address: {DIM}{plan.address[:40]}...{NC}")
+    print(f"  Amount:  {W}{fmt_sat(plan.amount_sat)}{NC}")
     print(f"\n  {DIM}Estimating transaction fee...{NC}")
-    wallet, _ = lncli("walletbalance")
-    confirmed = int((wallet or {}).get("confirmed_balance", 0))
-
-    # Use medium priority (10 sat/vbyte)
-    fee_rate = 10
-    est_fee_sat = fee_rate * 141  # Typical P2WPKH tx size
-    total_cost = amount_sat + est_fee_sat
-
-    print(f"  Est. Fee: ~{fmt_sat(est_fee_sat)} ({fee_rate} sat/vB)")
-    print(f"  Total:    ~{fmt_sat(total_cost)}")
-    print(f"  Balance:  {fmt_sat(confirmed)}")
-
-    if confirmed < total_cost:
-        print(f"\n  {R}❌ Insufficient funds!{NC}")
-        print(f"  Need: {fmt_sat(total_cost - confirmed)} more\n")
-        return
-
-    print(f"  Remaining: ~{fmt_sat(confirmed - total_cost)}")
+    print(f"  Est. Fee: ~{fmt_sat(plan.estimated_fee_sat)} ({plan.fee_rate_sat_vbyte} sat/vB)")
+    print(f"  Total:    ~{fmt_sat(plan.amount_sat + plan.estimated_fee_sat)}")
+    print(f"  Balance:  {fmt_sat(plan.confirmed_balance_sat)}")
+    print(f"  Remaining: ~{fmt_sat(plan.confirmed_balance_sat - plan.amount_sat - plan.estimated_fee_sat)}")
 
     if not confirm_write(
         "on-chain payment",
-        f"amount={amount_sat} address={address} estimated_fee={est_fee_sat}",
+        f"amount={plan.amount_sat} address={plan.address} estimated_fee={plan.estimated_fee_sat}",
     ):
         print()
         return
 
     print(f"  {DIM}Broadcasting transaction...{NC}")
-    result, err = lncli("sendcoins", f"--addr={address}", f"--amt={amount_sat}", f"--sat_per_vbyte={fee_rate}", timeout=30)
-
-    if err:
-        print(f"  {R}❌ Transaction failed: {err}{NC}\n")
-        return
-
-    txid = result.get("txid", "")
-    print(f"  {G}✅ Transaction broadcast!{NC}")
-    print(f"  TXID: {C}{txid}{NC}")
-    print(f"\n  {DIM}Waiting for confirmation (10-60 min typical){NC}")
-    print(f"{DIM}{'─' * 55}{NC}\n")
+    TOOL_REGISTRY.execute("bitcoin.send", plan, confirmed=True)
 
 
 def cmd_invoice(args):
@@ -5332,7 +5356,6 @@ for _name, _description, _handler in (
 
 for _name, _description, _handler in (
     ("payment.pay", "Pay a decoded Lightning invoice", cmd_pay),
-    ("bitcoin.send", "Send on-chain Bitcoin", cmd_send),
     ("channel.open", "Open a Lightning channel", cmd_channel),
     ("channel.close", "Close a Lightning channel", cmd_channel),
     ("channel.rebalance", "Rebalance liquidity between channels", cmd_rebalance),
@@ -5347,6 +5370,16 @@ for _name, _description, _handler in (
             handler=_handler,
         )
     )
+
+TOOL_REGISTRY.register(
+    ToolSpec(
+        name="bitcoin.send",
+        description="Send on-chain Bitcoin",
+        permission=Permission.EXPLICIT_CONFIRMATION,
+        handler=execute_send,
+        prepare_handler=prepare_send,
+    )
+)
 
 
 if __name__ == "__main__":
