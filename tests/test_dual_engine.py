@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 from mercury_cli.ai.engine import DualEngine
+from mercury_cli.ai.fast_path import deterministic_reply
 from mercury_cli.ai.hailo_client import HailoClient
 from mercury_cli.ai.snapshot import SnapshotBuilder
 
@@ -44,6 +45,48 @@ class FakeLlama:
 
 
 class DualEngineTests(unittest.TestCase):
+    def test_zero_channel_fast_path_uses_snapshot_only(self):
+        snapshot = {
+            "fresh": True,
+            "totals": {"active": 0},
+        }
+        self.assertIn("No active channels", deterministic_reply("What channels do I have?", snapshot))
+
+    def test_sync_fast_path_requires_complete_fresh_snapshot(self):
+        snapshot = {
+            "fresh": True,
+            "chain": {"height": 100, "synced": True},
+            "wallet": {"confirmed_sat": 10, "unconfirmed_sat": 2},
+        }
+        reply = deterministic_reply("Is the node ready?", snapshot)
+        self.assertIn("height 100", reply)
+        self.assertIsNone(
+            deterministic_reply("Is the node ready?", {**snapshot, "fresh": False})
+        )
+
+    def test_liquidity_fast_path_requires_active_channel(self):
+        snapshot = {
+            "fresh": True,
+            "totals": {
+                "active": 1,
+                "local_sat": 100,
+                "remote_sat": 300,
+                "inbound_pct": 75.0,
+                "outbound_pct": 25.0,
+            },
+        }
+        self.assertIn("75.0% inbound", deterministic_reply(
+            "What is my inbound and outbound liquidity?", snapshot
+        ))
+        self.assertIsNone(
+            deterministic_reply("What is my inbound and outbound liquidity?",
+                                 {**snapshot, "totals": {**snapshot["totals"], "active": 0}})
+        )
+
+    def test_fast_path_is_closed_set(self):
+        snapshot = {"fresh": True, "totals": {"active": 0}}
+        self.assertIsNone(deterministic_reply("Should I open a channel?", snapshot))
+
     def test_parse_plan_rejects_incomplete_json(self):
         self.assertEqual(HailoClient.parse_plan("```json\n" + str(PLAN) + "\n```"), None)
         self.assertEqual(HailoClient.parse_plan('{"intent":"liquidity"}'), None)

@@ -35,6 +35,7 @@ from mercury_cli.config import load_config
 from mercury_cli.lnd import LndClient, LncliError
 from mercury_cli.registry import Permission, ToolRegistry, ToolSpec
 from mercury_cli.ai.engine import DualEngine
+from mercury_cli.ai.fast_path import deterministic_reply
 from mercury_cli.ai.hailo_client import HailoClient
 from mercury_cli.ai.llama_client import LlamaClient
 from mercury_cli.ai.render import debug_timings, print_answer
@@ -3588,6 +3589,11 @@ def cmd_ask(args):
 
     config = load_config()
     snapshot = SnapshotBuilder(config, lncli_runner=lncli).build()
+    fast_reply = deterministic_reply(question, snapshot)
+    if fast_reply is not None:
+        print_answer(question, fast_reply)
+        return 0
+
     hailo = HailoClient(config.hailo_url, config.hailo_model)
     llama = LlamaClient(config.local_llm_url, str(config.local_llm_model))
     hailo_ok = config.split_ai and hailo.healthy()
