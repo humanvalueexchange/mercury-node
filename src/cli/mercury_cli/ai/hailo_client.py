@@ -73,23 +73,59 @@ class HailoClient:
             return None
         if not isinstance(value, dict):
             return None
-        aliases = {
+        if "recommendation" in value and isinstance(value["recommendation"], dict):
+            value["recommendation"] = value["recommendation"].get("action")
+        for source, target in {
             "tooling_needed": "need_tools",
             "blist": "bullets",
             "recommendation": "recommended_action",
-        }
-        if "recommendation" in value and isinstance(value["recommendation"], dict):
-            value["recommendation"] = value["recommendation"].get("action")
-        for source, target in aliases.items():
+        }.items():
             if target not in value and source in value:
                 value[target] = value[source]
-        required = {"intent", "need_tools", "risks", "bullets", "answer_sketch", "recommended_action"}
+        required = {
+            "intent",
+            "need_tools",
+            "risks",
+            "bullets",
+            "answer_sketch",
+            "recommended_action",
+        }
         if not required.issubset(value):
             return None
-        if value["intent"] not in {"rebalance", "liquidity", "status", "pay", "invoice", "other"}:
+        if not isinstance(value["intent"], str) or value["intent"] not in {
+            "rebalance",
+            "liquidity",
+            "status",
+            "pay",
+            "invoice",
+            "other",
+        }:
             return None
-        if value["recommended_action"] not in {"observe", "recommend", "requires_human_confirm"}:
+        if (
+            not isinstance(value["recommended_action"], str)
+            or value["recommended_action"]
+            not in {"observe", "recommend", "requires_human_confirm"}
+        ):
             return None
-        if not all(isinstance(value[key], list) for key in ("need_tools", "risks", "bullets")):
+        if not isinstance(value["answer_sketch"], str) or len(value["answer_sketch"]) > 400:
             return None
-        return value
+        limits = {"need_tools": 3, "risks": 5, "bullets": 5}
+        allowed_tools = {"channels", "payments", "routing"}
+        for key, limit in limits.items():
+            items = value[key]
+            if (
+                not isinstance(items, list)
+                or len(items) > limit
+                or not all(isinstance(item, str) and len(item) <= 160 for item in items)
+            ):
+                return None
+            if key == "need_tools" and not set(items).issubset(allowed_tools):
+                return None
+        return {
+            "intent": value["intent"],
+            "need_tools": value["need_tools"],
+            "risks": value["risks"],
+            "bullets": value["bullets"],
+            "answer_sketch": value["answer_sketch"],
+            "recommended_action": value["recommended_action"],
+        }

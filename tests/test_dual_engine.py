@@ -116,6 +116,36 @@ class DualEngineTests(unittest.TestCase):
         self.assertEqual(HailoClient.parse_plan("```json\n" + str(PLAN) + "\n```"), None)
         self.assertEqual(HailoClient.parse_plan('{"intent":"liquidity"}'), None)
 
+    def test_parse_plan_normalizes_aliases_and_drops_unknown_fields(self):
+        raw = (
+            '{"intent":"status","tooling_needed":["channels"],'
+            '"risks":[],"blist":["Ready"],"answer_sketch":"Ready.",'
+            '"recommendation":{"action":"observe"},"execute":"pay"}'
+        )
+        parsed = HailoClient.parse_plan(raw)
+        self.assertEqual(parsed["need_tools"], ["channels"])
+        self.assertEqual(parsed["bullets"], ["Ready"])
+        self.assertEqual(parsed["recommended_action"], "observe")
+        self.assertNotIn("execute", parsed)
+
+    def test_parse_plan_rejects_invalid_types_limits_and_tools(self):
+        base = {
+            "intent": "status",
+            "need_tools": [],
+            "risks": [],
+            "bullets": [],
+            "answer_sketch": "Ready.",
+            "recommended_action": "observe",
+        }
+        invalid = [
+            {**base, "answer_sketch": 1},
+            {**base, "bullets": ["x"] * 6},
+            {**base, "need_tools": ["execute"]},
+            {**base, "risks": ["x" * 161]},
+        ]
+        for value in invalid:
+            self.assertIsNone(HailoClient.parse_plan(__import__("json").dumps(value)))
+
     def test_hailo_failure_returns_draft(self):
         result = asyncio.run(DualEngine(FakeHailo(error=RuntimeError()), FakeLlama()).ask("q", {}))
         self.assertEqual(result.source, "draft")
