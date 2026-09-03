@@ -67,7 +67,7 @@ user `btcpay`. LND is configured with an automated wallet-unlock password file u
 | Model context | 32,768 tokens |
 | LLM threads | 4 |
 | Mercury model inventory | Qwen3.8-2B-Distill-Q4_K_M.gguf (active) |
-| Extra service | `hve-lifeos.service` |
+| HVE-LIFE-OS | Retired and disabled; not part of the Mercury contract |
 
 The agent binds to localhost by default. If the authenticated backup endpoint is enabled,
 `MERCURY_BACKUP_TOKEN` must be supplied through the root-readable
@@ -77,11 +77,11 @@ repository.
 Static channel backups are stored under `/var/lib/mercury/backups` and are intended to be
 owned by `lnd` with restrictive permissions.
 
-All observed services were active during the 2026-09-02 reconciliation:
+The supported services were active during the 2026-09-02 reconciliation:
 
 ```text
 bitcoind  lnd  nbxplorer  btcpayserver  nginx
-mercury-agent  mercury-llm  hve-lifeos
+mercury-agent  mercury-llm
 ```
 
 ## Runtime state
@@ -100,6 +100,11 @@ The following non-sensitive runtime facts were collected over SSH on
 - The host reported 15 GiB total memory, 4.4 GiB used, 11 GiB available, and
   1.7 GiB of 2 GiB swap used.
 - Host uptime was approximately 6 weeks and 2 days.
+
+HVE-LIFE-OS was observed as an out-of-contract active service during the
+21:24 EDT reconciliation. It was subsequently stopped and disabled on
+2026-09-02; its files and code were retained and not deleted. It is not a
+supported Mercury service and must not be re-enabled.
 
 ## Network exposure
 

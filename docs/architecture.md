@@ -10,6 +10,21 @@ and Lightning services form the money layer; Mercury provides a local operator
 CLI, a telemetry/read-and-prepare FastAPI service, and a local llama.cpp model
 service.
 
+## Hermes and HVE-LIFE-OS boundary
+
+Mercury Node is a standalone Bitcoin, Lightning, and local-AI appliance. The
+Hermes framework and HVE-LIFE-OS are not supported on the Pi and must not be
+installed, enabled, or treated as Mercury dependencies.
+
+The Mercury CLI is the canonical operator and control interface. The Mercury
+Agent and native llama.cpp service support the CLI locally. HVE-CFO may
+integrate in the future only through a narrow authenticated Mercury interface;
+it must not run Hermes on the Pi or receive unrestricted shell, wallet, LND, or
+service access.
+
+Bitcoin Core and LND must remain usable if Mercury AI, HVE-CFO, Hermes, or the
+DGX Spark is unavailable.
+
 ```text
 ┌──────────────────────────────────────────────────────────┐
 │ Operator                                                │

@@ -31,7 +31,7 @@ identity was checked by SHA-256 rather than by deployed Git commit.
 | Mercury LLM | Active; health `ok`; localhost `127.0.0.1:8089` |
 | Local model | Qwen3.8-2B-Distill-Q4_K_M via native llama.cpp |
 | Hailo | Hailo-10H PCIe device present |
-| Supporting services | `nbxplorer`, `btcpayserver`, `nginx`, and `hve-lifeos` active |
+| Supporting services | `nbxplorer`, `btcpayserver`, and `nginx` active |
 
 ## Listener reconciliation
 
@@ -141,5 +141,15 @@ server or public registry exists.
 5. Keep the CFO integration localhost-only and read/prepare-only until its
    separate promotion gate passes.
 
-No wallet, service, credential, or runtime change was made during this
-reconciliation.
+## Post-reconciliation retirement action
+
+The initial 21:24 EDT snapshot found `hve-lifeos.service` active, but outside
+the supported Mercury architecture. After the snapshot, the service was
+stopped and disabled over SSH. No HVE-LIFE-OS files or code were deleted.
+
+The current Mercury contract now excludes HVE-LIFE-OS and the Hermes framework.
+The Mercury CLI, Mercury Agent, and native llama.cpp service remain the
+canonical Bitcoin, Lightning, and local-AI control plane.
+
+No wallet, credential, or supported Mercury service was changed during the
+retirement action.

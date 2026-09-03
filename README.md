@@ -4,6 +4,11 @@ Mercury Node is a self-hosted Bitcoin and Lightning operator console with a loca
 AI assistant. The current reference deployment is a **Debian GNU/Linux 13
 (trixie), ARM64 Raspberry Pi 5-class node** with a Hailo-10H PCIe accelerator.
 
+**Architecture boundary:** Mercury Node is standalone. The Hermes framework and
+HVE-LIFE-OS are retired from this host and are not supported dependencies.
+The Mercury CLI, Mercury Agent, and native llama.cpp service are the canonical
+control plane for all Bitcoin, Lightning, and local-AI operations.
+
 > **Deployment status:** This repository is under active development. The live
 > reference host and the checked-in installer are not identical; do not use the
 > installer with production funds without reviewing its limitations below.
@@ -31,6 +36,9 @@ The latest non-sensitive live reconciliation was performed on `mercury2` on
 2026-09-02. Mercury Agent and Mercury LLM remain localhost-only; Bitcoin P2P,
 Lightning peer transport, and nginx use separate node/web listeners documented
 in [docs/current-state.md](docs/current-state.md).
+
+See [docs/architecture-boundary.md](docs/architecture-boundary.md) for the
+permanent separation from Hermes and HVE-LIFE-OS.
 
 ## Layout
 

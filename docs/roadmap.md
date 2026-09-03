@@ -20,6 +20,8 @@ work; unchecked items are not promises of the current installer.
   routing, backups, logs, AI queries, channel operations, and diagnostics
 - [x] Backup endpoint token check and restrictive backup file permissions
 - [x] Live runtime reconciliation against the reference host on 2026-09-02
+- [x] Retire and disable HVE-LIFE-OS on Mercury; retain files without running
+  the service
 
 Hailo-8L, Phi-3.5-mini, and the old Hailo-specific inference path are retired
 claims. They are not current milestones.
@@ -51,6 +53,9 @@ claims. They are not current milestones.
 The registry is currently a partial refactor, not a complete authorization
 boundary.
 
+The Mercury CLI remains the canonical control plane. Hermes framework and
+HVE-LIFE-OS deployment on this host are permanent non-goals.
+
 ### Operational hardening
 
 - [ ] Add deployment documentation for the observed systemd units and
@@ -74,6 +79,13 @@ These remain proposals and are not present in the current source:
 - [ ] Automatic agent-to-agent Lightning payments
 - [ ] Mobile companion and push notification product
 - [ ] Anomaly detection, fee forecasting, and routing optimization models
+
+The following are permanent non-goals for the Mercury Pi:
+
+- Hermes framework deployment;
+- HVE-LIFE-OS deployment;
+- making Bitcoin or Lightning operation depend on the DGX Spark;
+- replacing the Mercury CLI with a Hermes gateway.
 
 Any future mesh or registry work must preserve the current security boundary:
 the AI layer must not gain autonomous authority to move funds, and a node must

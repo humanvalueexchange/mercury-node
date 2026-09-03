@@ -18,6 +18,10 @@ llama.cpp. Hailo-8L,
 Phi-3.5-mini, MCP mesh, and public registry claims describe obsolete or
 unimplemented designs.
 
+The Hermes framework and HVE-LIFE-OS are not Mercury dependencies. HVE-LIFE-OS
+was retired from the host on 2026-09-02; its files may remain for historical
+purposes, but its service must stay disabled.
+
 ## Reporting a vulnerability
 
 Do **not** open a public GitHub issue for a vulnerability. Report privately to
@@ -75,6 +79,9 @@ policy. Public web exposure does not authenticate the Mercury API.
 
 If remote access is required, put the service behind an authenticated,
 encrypted reverse proxy or private network and restrict the exposed routes.
+
+Mercury’s supported control plane is the local CLI, Agent, and llama.cpp
+service. Do not add Hermes or HVE-LIFE-OS as an alternate control plane.
 
 ## Filesystem and service controls
 
