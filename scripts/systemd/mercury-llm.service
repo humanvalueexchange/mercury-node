@@ -7,14 +7,16 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-User=root
+User=mercury-llm
+Group=mercury-llm
+CPUAffinity=2 3
 Environment=LD_LIBRARY_PATH=/opt/mercury/llama.cpp/lib
 ExecStart=/opt/mercury/llama.cpp/bin/llama-server \
   -m /opt/mercury/models/Qwen3.8-2B-Distill-Q4_K_M.gguf \
   --host 127.0.0.1 \
   --port 8089 \
-  --ctx-size 32768 \
-  --threads 4 \
+  --ctx-size 8192 \
+  --threads 2 \
   --reasoning off
 Restart=always
 RestartSec=10

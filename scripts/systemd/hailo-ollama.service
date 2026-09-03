@@ -1,0 +1,18 @@
+[Unit]
+Description=Mercury Hailo planner (hailo-ollama)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hailo-ollama
+Group=hailo-ollama
+Environment=OLLAMA_HOST=127.0.0.1:8000
+Environment=OLLAMA_KEEP_ALIVE=-1
+# Verify the package-provided path on the target host before enablement.
+ExecStart=/usr/bin/hailo-ollama serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

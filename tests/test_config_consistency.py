@@ -36,6 +36,10 @@ def load_cli():
 
 
 def load_config():
+    return load_config_module().load_config({})
+
+
+def load_config_module():
     loader = SourceFileLoader(
         "mercury_cli_config_module",
         str(PACKAGE_PATH / "mercury_cli" / "config.py"),
@@ -44,10 +48,20 @@ def load_config():
     module = importlib.util.module_from_spec(spec)
     sys.modules[loader.name] = module
     spec.loader.exec_module(module)
-    return module.load_config({})
+    return module
 
 
 class ConfigConsistencyTests(unittest.TestCase):
+    def test_split_ai_defaults_and_reads_local_overrides(self):
+        config_module = load_config_module()
+        config = config_module.MercuryConfig.from_env({
+            "MERCURY_HAILO_URL": "http://127.0.0.1:18000",
+            "MERCURY_ALLOW_DGX": "1",
+        })
+        self.assertEqual(config.hailo_url, "http://127.0.0.1:18000")
+        self.assertTrue(config.split_ai)
+        self.assertTrue(config.allow_dgx)
+
     def test_cli_and_agent_use_the_same_lnd_directory(self):
         config = load_config()
         agent = constants_from(AGENT_PATH)

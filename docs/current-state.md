@@ -62,10 +62,15 @@ user `btcpay`. LND is configured with an automated wallet-unlock password file u
 | Mercury LLM | native llama.cpp `llama-server` |
 | LLM endpoint | `127.0.0.1:8089` |
 | Active model | `Qwen3.8-2B-Distill-Q4_K_M.gguf` |
-| Model context | 32,768 tokens |
-| LLM threads | 4 |
+| Model context | 32,768 tokens (live snapshot; repository target is 8,192) |
+| LLM threads | 4 (live snapshot; repository target is 2 pinned to cores 2-3) |
 | Mercury model inventory | Qwen3.8-2B-Distill-Q4_K_M.gguf (active) |
-| Extra service | `hve-lifeos.service` |
+| Mercury Hailo planner | `hailo-ollama` on `127.0.0.1:8000` (not installed at snapshot) |
+| Extra service | `hve-lifeos.service` (retired; retained only as historical host state) |
+
+The Hailo + CPU split is approved for repository implementation but is not
+deployed by this snapshot. The checked-in Hailo unit is localhost-only and
+requires separate package, model, and live-service approval.
 
 The agent binds to localhost by default. If the authenticated backup endpoint is enabled,
 `MERCURY_BACKUP_TOKEN` must be supplied through the root-readable

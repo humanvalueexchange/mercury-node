@@ -22,6 +22,7 @@ Usage:
 import sys
 import os
 import json
+import asyncio
 import subprocess
 import argparse
 import shutil
@@ -33,6 +34,11 @@ from pathlib import Path
 from mercury_cli.config import load_config
 from mercury_cli.lnd import LndClient, LncliError
 from mercury_cli.registry import Permission, ToolRegistry, ToolSpec
+from mercury_cli.ai.engine import DualEngine
+from mercury_cli.ai.hailo_client import HailoClient
+from mercury_cli.ai.llama_client import LlamaClient
+from mercury_cli.ai.render import debug_timings, print_answer
+from mercury_cli.ai.snapshot import SnapshotBuilder
 try:
     import readline
 except ImportError:
@@ -2727,7 +2733,7 @@ def _build_node_context():
 
 
 def _print_ai_answer(question, answer, local=True):
-    label = "Local — Qwen3.8-2B" if local else f"DGX Spark — {OLLAMA_MODEL}"
+    label = "Local" if local else "Remote"
     print(f"\n{C}🤖 Mercury AI{NC}  {DIM}({label}){NC}")
     print(f"{DIM}{'─' * 55}{NC}")
     print(f"  {W}Q:{NC} {question}\n")
@@ -3573,9 +3579,6 @@ def cmd_ask(args):
         )
         return
 
-    if _try_rule_based_answer(question):
-        return
-
     # Check for typos before falling back to LLM
     suggestion = _fuzzy_match_command(question)
     if suggestion:
@@ -3583,52 +3586,34 @@ def cmd_ask(args):
         print("Tip: Check your spelling and try again.\n")
         return
 
-    node_ctx = _build_node_context()
-    system_prompt = (
-        "You are Mercury, an AI agent living inside a sovereign Bitcoin Lightning node "
-        "operated by Human Value Exchange (HVE). You have real-time access to the node's "
-        "telemetry. Answer concisely and practically. Always think in SATs. "
-        "You run locally on a Raspberry Pi 5 with a Hailo-10H AI accelerator. "
-        "Your current LLM is Qwen3.8-2B-Distill, running fully on-device. "
-        "You are self-contained and do not depend on any external system. "
-        "Recommend actions when useful but note that human approval is required before any funds move. "
-        "Important Lightning rules: a Magma offer's size_sat is inbound channel capacity, not the direct purchase cost. "
-        "For Magma affordability, compare confirmed balance to lease fee plus chain/opening costs, not to channel size. "
-        "If the node has only one active channel and near-zero remote balance, do not recommend circular rebalance; recommend inbound liquidity, a second channel, or spending out over Lightning instead.\n"
-        "Current node data:\n" + node_ctx
-    )
+    config = load_config()
+    snapshot = SnapshotBuilder(config, lncli_runner=lncli).build()
+    hailo = HailoClient(config.hailo_url, config.hailo_model)
+    llama = LlamaClient(config.local_llm_url, str(config.local_llm_model))
+    hailo_ok = config.split_ai and hailo.healthy()
+    llama_ok = llama.healthy()
 
-    local_ok = False
-    try:
-        urllib.request.urlopen(f"{LOCAL_LLM_URL}/v1/models", timeout=2)
-        local_ok = True
-    except urllib.error.URLError:
-        pass
+    if not hailo_ok and not llama_ok:
+        if config.allow_dgx:
+            return 0 if _ask_dgx(question, "Mercury local engines unavailable.") else 1
+        print_answer(question, "Mercury AI unavailable (local engines down).")
+        return 1
 
-    if local_ok:
-        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(Local — Qwen3.8-2B){NC}")
-        print(f"{DIM}{'─' * 55}{NC}")
-        print(f"  {W}Q:{NC} {question}\n")
-        if _ask_local(question, system_prompt):
-            return
+    class DisabledHailo:
+        @staticmethod
+        async def chat(*_args, **_kwargs):
+            raise RuntimeError("Hailo planner disabled")
 
-    dgx_ok = False
-    try:
-        urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3)
-        dgx_ok = True
-    except urllib.error.URLError:
-        pass
+        @staticmethod
+        def parse_plan(_text):
+            return None
 
-    if dgx_ok:
-        print(f"\n{C}🤖 Mercury AI{NC}  {DIM}(DGX Spark — {OLLAMA_MODEL}){NC}")
-        print(f"{DIM}{'─' * 55}{NC}")
-        print(f"  {W}Q:{NC} {question}\n")
-        print(f"  {Y}Local AI unavailable — using DGX Spark{NC}\n")
-        _ask_dgx(question, system_prompt)
-        return
-
-    print(f"\n  {R}Mercury AI unavailable — local LLM and DGX both unreachable{NC}")
-    print(f"  {DIM}sudo systemctl start mercury-llm{NC}\n")
+    engine = DualEngine(hailo if hailo_ok else DisabledHailo(), llama, debug=config.ai_debug)
+    result = asyncio.run(engine.ask(question, snapshot))
+    print_answer(question, result.text)
+    if config.ai_debug:
+        debug_timings(result.timings_ms)
+    return 0 if result.source != "unavailable" else 1
 
 
 def cmd_alerts(args):
@@ -5540,7 +5525,9 @@ def main():
 
     if args.command in dispatch:
         try:
-            dispatch[args.command](args)
+            result = dispatch[args.command](args)
+            if args.command == "ask" and isinstance(result, int):
+                raise SystemExit(result)
         except KeyboardInterrupt:
             print()
 

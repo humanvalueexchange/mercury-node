@@ -16,6 +16,8 @@ LOCAL_LLM_MODEL = "/opt/mercury/models/Qwen3.8-2B-Distill-Q4_K_M.gguf"
 BACKUP_DIR = "/var/lib/mercury/backups"
 OLLAMA_URL = "http://10.0.0.79:11434"
 OLLAMA_MODEL = "qwen2.5:14b"
+HAILO_URL = "http://127.0.0.1:8000"
+HAILO_MODEL = "qwen2.5-instruct:1.5b"
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,11 @@ class MercuryConfig:
     backup_path: Path = Path(BACKUP_DIR)
     ollama_url: str = OLLAMA_URL
     ollama_model: str = OLLAMA_MODEL
+    hailo_url: str = HAILO_URL
+    hailo_model: str = HAILO_MODEL
+    split_ai: bool = True
+    ai_debug: bool = False
+    allow_dgx: bool = False
     lnd_user: str = LND_USER
 
     def __post_init__(self) -> None:
@@ -46,6 +53,11 @@ class MercuryConfig:
             model_path=env.get("MERCURY_LOCAL_LLM_MODEL", LOCAL_LLM_MODEL),
             ollama_url=env.get("MERCURY_OLLAMA_URL", OLLAMA_URL),
             ollama_model=env.get("MERCURY_OLLAMA_MODEL", OLLAMA_MODEL),
+            hailo_url=env.get("MERCURY_HAILO_URL", HAILO_URL),
+            hailo_model=env.get("MERCURY_HAILO_MODEL", HAILO_MODEL),
+            split_ai=_env_bool(env, "MERCURY_SPLIT_AI", True),
+            ai_debug=_env_bool(env, "MERCURY_AI_DEBUG", False),
+            allow_dgx=_env_bool(env, "MERCURY_ALLOW_DGX", False),
         )
 
     from_environment = from_env
@@ -68,10 +80,25 @@ def load_config(environ: Mapping[str, str] | None = None) -> MercuryConfig:
 
 Config = MercuryConfig
 
+
+def _env_bool(environ: Mapping[str, str], key: str, default: bool) -> bool:
+    """Parse explicit boolean environment flags without accepting typos silently."""
+    value = environ.get(key)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{key} must be a boolean value")
+
 __all__ = [
     "AGENT_URL",
     "BACKUP_DIR",
     "Config",
+    "HAILO_MODEL",
+    "HAILO_URL",
     "LOCAL_LLM_MODEL",
     "LOCAL_LLM_URL",
     "LND_DIR",

@@ -19,6 +19,8 @@ work; unchecked items are not promises of the current installer.
 - [x] Operational CLI for status, health, sync, channels, invoices, payments,
   routing, backups, logs, AI queries, channel operations, and diagnostics
 - [x] Backup endpoint token check and restrictive backup file permissions
+- [ ] Implement approved Hailo + CPU split reasoning path (repository branch;
+  live installation and model pull require separate approval)
 
 Hailo-8L, Phi-3.5-mini, and the old Hailo-specific inference path are retired
 claims. They are not current milestones.

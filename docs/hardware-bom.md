@@ -25,9 +25,10 @@ Bitcoin operation.
 | Cooling | Active cooling is recommended for continuous load |
 | Network | Wired Ethernet is preferred |
 
-The active local model is `Qwen3.8-2B-Distill-Q4_K_M.gguf`, served by native
-`llama.cpp`. The Hailo-10H is part of the reference hardware; the old Hailo-8L
-and Phi-3.5-mini BOM is obsolete.
+The approved local reasoning contract pairs `qwen2.5-instruct:1.5b` through
+`hailo-ollama` on localhost with `Qwen3.8-2B-Distill-Q4_K_M.gguf` through native
+`llama.cpp` for drafting and merging. The old Hailo-8L and Phi-3.5-mini BOM is
+obsolete. The split is not deployed by the dated snapshot.
 
 ## Procurement guidance
 

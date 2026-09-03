@@ -17,6 +17,7 @@ AI assistant. The current reference deployment is a **Debian GNU/Linux 13
 | AI accelerator | Hailo-10H PCIe co-processor |
 | Local model | `Qwen3.8-2B-Distill-Q4_K_M.gguf` via native `llama.cpp` |
 | LLM service | `llama-server` on `127.0.0.1:8089` |
+| Approved split planner | `hailo-ollama` on `127.0.0.1:8000` (repository contract; not deployed by the dated snapshot) |
 | Bitcoin | Bitcoin Core 30.2.0; data at `/mnt/blockchain/bitcoin` |
 | Lightning | LND 0.20.1-beta; data at `/var/lib/lnd` |
 | Agent | FastAPI service, version 0.5.5, on `127.0.0.1:8088` |

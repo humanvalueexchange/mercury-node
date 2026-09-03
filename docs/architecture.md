@@ -16,8 +16,8 @@ CLI, a read-oriented FastAPI service, and a local llama.cpp model service.
 ├──────────────────────────────────────────────────────────┤
 │ Mercury application                                     │
 │ /opt/mercury/agent/main.py  FastAPI :8088 (localhost)   │
-│ /opt/mercury/llama.cpp/bin/llama-server :8089 (localhost)│
-│ Qwen3.8-2B-Distill-Q4_K_M.gguf                          │
+│ hailo-ollama :8000 + llama-server :8089 (localhost)    │
+│ Hailo Qwen 1.5B + CPU Qwen3.8-2B-Distill              │
 ├──────────────────────────────────────────────────────────┤
 │ Lightning / payments                                    │
 │ LND 0.20.1-beta  │  BTCPay Server  │  NBXplorer        │
@@ -30,9 +30,9 @@ CLI, a read-oriented FastAPI service, and a local llama.cpp model service.
 └──────────────────────────────────────────────────────────┘
 ```
 
-The Hailo-10H is part of the reference hardware. The active model contract is
-native `llama.cpp`; documentation must not imply that the old Hailo-8L/Phi-3.5
-pipeline is still deployed.
+The Hailo-10H is part of the reference hardware. The approved split contract
+uses `hailo-ollama` for short planning and native `llama.cpp` for CPU drafting
+and merging. The old Hailo-8L/Phi-3.5 pipeline remains retired.
 
 ## Runtime services and paths
 
@@ -49,6 +49,7 @@ by the checked-in installer.
 | BTCPay Server | `/opt/btcpayserver/BTCPayServer.dll`; user `btcpay` |
 | Mercury Agent | `/opt/mercury/agent`; user `lnd`; port 8088 |
 | Mercury LLM | `/opt/mercury/llama.cpp`; model under `/opt/mercury/models`; port 8089 |
+| Mercury Hailo planner | `hailo-ollama`; port 8000; localhost only |
 | Backups | `/var/lib/mercury/backups` |
 
 `mercury-agent.service` uses `NoNewPrivileges`, `ProtectSystem=strict`, and
@@ -121,15 +122,16 @@ arbitrary shell commands.
 
 ```text
 mercury ask "..."
-  ├─> collect current LND/Bitcoin context
-  ├─> POST OpenAI-compatible request to 127.0.0.1:8089
-  ├─> llama-server loads Qwen3.8-2B-Distill
-  └─> print response
+  ├─> build one bounded, secret-free node snapshot
+  ├─> POST Ollama plan to 127.0.0.1:8000
+  ├─> POST CPU draft to 127.0.0.1:8089 concurrently
+  ├─> merge locally through llama-server when both are available
+  └─> print one advisory answer labeled Local
 ```
 
-If configured and reachable, the CLI can also use its DGX Spark Ollama URL as a
-fallback. That remote Ollama endpoint is an operator configuration, not a
-required Mercury service.
+AI output is advisory only and never executes `/api/tools/{name}/execute` or
+fund-moving operations. The remote DGX Ollama URL is disabled by default and
+requires explicit opt-in; Mercury remains operational without it.
 
 ### Backup
 
