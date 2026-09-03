@@ -3594,9 +3594,11 @@ def cmd_ask(args):
         print_answer(question, fast_reply)
         return 0
 
-    hailo = HailoClient(config.hailo_url, config.hailo_model)
+    hailo = HailoClient(
+        config.hailo_url, config.hailo_model, ready_file=config.hailo_ready_file
+    )
     llama = LlamaClient(config.local_llm_url, str(config.local_llm_model))
-    hailo_ok = config.split_ai and hailo.healthy()
+    hailo_ok = config.split_ai and hailo.ready()
     llama_ok = llama.healthy()
 
     if not hailo_ok and not llama_ok:

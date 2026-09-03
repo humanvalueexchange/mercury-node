@@ -1,6 +1,8 @@
 import asyncio
+import tempfile
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
 
 from mercury_cli.ai.engine import DualEngine
 from mercury_cli.ai.fast_path import deterministic_reply
@@ -60,6 +62,14 @@ class FailingMergeLlama(FakeLlama):
 
 
 class DualEngineTests(unittest.TestCase):
+    def test_hailo_ready_requires_marker_and_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = HailoClient("http://127.0.0.1:8000", "model", ready_file=Path(directory) / "ready")
+            client.healthy = lambda: True
+            self.assertFalse(client.ready())
+            Path(directory, "ready").touch()
+            self.assertTrue(client.ready())
+
     def test_zero_channel_fast_path_uses_snapshot_only(self):
         snapshot = {
             "fresh": True,

@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep Mercury Hailo planner warm
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=mercury-hailo-prewarm.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

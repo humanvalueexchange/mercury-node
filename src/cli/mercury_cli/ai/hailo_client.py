@@ -3,16 +3,37 @@
 from __future__ import annotations
 
 import json
+import asyncio
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+_hailo_request_lock: asyncio.Lock | None = None
+_hailo_request_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _request_lock() -> asyncio.Lock:
+    global _hailo_request_lock, _hailo_request_loop
+    loop = asyncio.get_running_loop()
+    if _hailo_request_lock is None or _hailo_request_loop is not loop:
+        _hailo_request_lock = asyncio.Lock()
+        _hailo_request_loop = loop
+    return _hailo_request_lock
+
 
 class HailoClient:
-    def __init__(self, base: str, model: str, timeout: float = 2.5) -> None:
+    def __init__(
+        self,
+        base: str,
+        model: str,
+        timeout: float = 2.5,
+        ready_file: str | Path = "/run/hailo-ollama/ready",
+    ) -> None:
         self.base = base.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.ready_file = Path(ready_file)
 
     def healthy(self) -> bool:
         try:
@@ -20,6 +41,10 @@ class HailoClient:
             return response.status_code == 200
         except httpx.HTTPError:
             return False
+
+    def ready(self) -> bool:
+        """Require both an HTTP service and a completed model prewarm."""
+        return self.ready_file.is_file() and self.healthy()
 
     async def chat(
         self, messages: list[dict[str, str]], num_predict: int = 200
@@ -30,10 +55,11 @@ class HailoClient:
             "stream": False,
             "options": {"num_predict": num_predict, "temperature": 0.2},
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(f"{self.base}/api/chat", json=payload)
-            response.raise_for_status()
-            data = response.json()
+        async with _request_lock():
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(f"{self.base}/api/chat", json=payload)
+                response.raise_for_status()
+                data = response.json()
         return (data.get("message") or {}).get("content") or data.get("response") or ""
 
     @staticmethod

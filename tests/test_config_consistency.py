@@ -59,6 +59,7 @@ class ConfigConsistencyTests(unittest.TestCase):
             "MERCURY_ALLOW_DGX": "1",
         })
         self.assertEqual(config.hailo_url, "http://127.0.0.1:18000")
+        self.assertEqual(str(config.hailo_ready_file), "/run/hailo-ollama/ready")
         self.assertTrue(config.split_ai)
         self.assertTrue(config.allow_dgx)
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=Prewarm Mercury Hailo planner
+After=hailo-ollama.service
+Requires=hailo-ollama.service
+
+[Service]
+Type=oneshot
+User=hailo-ollama
+Group=hailo-ollama
+Environment=MERCURY_HAILO_URL=http://127.0.0.1:8000
+Environment=MERCURY_HAILO_MODEL=qwen2.5-instruct:1.5b
+Environment=MERCURY_HAILO_READY_FILE=/run/hailo-ollama/ready
+ExecStart=/opt/mercury/venv/bin/python /usr/local/libexec/mercury-hailo-prewarm.py
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

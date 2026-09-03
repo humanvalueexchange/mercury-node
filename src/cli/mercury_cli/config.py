@@ -18,6 +18,7 @@ OLLAMA_URL = "http://10.0.0.79:11434"
 OLLAMA_MODEL = "qwen2.5:14b"
 HAILO_URL = "http://127.0.0.1:8000"
 HAILO_MODEL = "qwen2.5-instruct:1.5b"
+HAILO_READY_FILE = "/run/hailo-ollama/ready"
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class MercuryConfig:
     ollama_model: str = OLLAMA_MODEL
     hailo_url: str = HAILO_URL
     hailo_model: str = HAILO_MODEL
+    hailo_ready_file: Path = Path(HAILO_READY_FILE)
     split_ai: bool = True
     ai_debug: bool = False
     allow_dgx: bool = False
@@ -43,6 +45,7 @@ class MercuryConfig:
         object.__setattr__(self, "lnd_dir", Path(self.lnd_dir))
         object.__setattr__(self, "model_path", Path(self.model_path))
         object.__setattr__(self, "backup_path", Path(self.backup_path))
+        object.__setattr__(self, "hailo_ready_file", Path(self.hailo_ready_file))
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "MercuryConfig":
@@ -55,6 +58,7 @@ class MercuryConfig:
             ollama_model=env.get("MERCURY_OLLAMA_MODEL", OLLAMA_MODEL),
             hailo_url=env.get("MERCURY_HAILO_URL", HAILO_URL),
             hailo_model=env.get("MERCURY_HAILO_MODEL", HAILO_MODEL),
+            hailo_ready_file=env.get("MERCURY_HAILO_READY_FILE", HAILO_READY_FILE),
             split_ai=_env_bool(env, "MERCURY_SPLIT_AI", True),
             ai_debug=_env_bool(env, "MERCURY_AI_DEBUG", False),
             allow_dgx=_env_bool(env, "MERCURY_ALLOW_DGX", False),
@@ -98,6 +102,7 @@ __all__ = [
     "BACKUP_DIR",
     "Config",
     "HAILO_MODEL",
+    "HAILO_READY_FILE",
     "HAILO_URL",
     "LOCAL_LLM_MODEL",
     "LOCAL_LLM_URL",

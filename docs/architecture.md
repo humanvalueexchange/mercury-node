@@ -52,6 +52,12 @@ by the checked-in installer.
 | Mercury Hailo planner | `hailo-ollama`; port 8000; localhost only |
 | Backups | `/var/lib/mercury/backups` |
 
+The Hailo planner is considered request-ready only after a completed,
+non-sensitive prewarm writes the systemd-lifecycle readiness marker under
+`/run/hailo-ollama/`. The CLI skips Hailo while that marker is absent, avoiding
+cold model loading on an operator request; the checked-in prewarm service and
+timer do not authorize live enablement by themselves.
+
 `mercury-agent.service` uses `NoNewPrivileges`, `ProtectSystem=strict`, and
 explicit write access only to `/var/lib/mercury` and `/var/lib/lnd`. The LLM
 service binds to `127.0.0.1` and is not a public inference endpoint.
