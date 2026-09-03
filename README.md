@@ -27,6 +27,11 @@ See [docs/current-state.md](docs/current-state.md) for the dated live snapshot,
 [docs/architecture.md](docs/architecture.md) for service boundaries, and
 [docs/hardware-bom.md](docs/hardware-bom.md) for the reference hardware.
 
+The latest non-sensitive live reconciliation was performed on `mercury2` on
+2026-09-02. Mercury Agent and Mercury LLM remain localhost-only; Bitcoin P2P,
+Lightning peer transport, and nginx use separate node/web listeners documented
+in [docs/current-state.md](docs/current-state.md).
+
 ## Layout
 
 The live deployment keeps Mercury application files under:

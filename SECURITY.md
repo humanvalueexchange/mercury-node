@@ -12,8 +12,9 @@ using production funds.
 | Current repository/live deployment | Best-effort development support |
 | Older v0.x designs | Not supported |
 
-The live reference deployment uses Bitcoin Core 30.2.0, LND 0.20.1-beta,
-Mercury Agent 0.5.5, and Qwen3.8-2B through native llama.cpp. Hailo-8L,
+The 2026-09-02 live reconciliation confirms Bitcoin Core 30.2.0,
+LND 0.20.1-beta, Mercury Agent 0.5.5, and Qwen3.8-2B through native
+llama.cpp. Hailo-8L,
 Phi-3.5-mini, MCP mesh, and public registry claims describe obsolete or
 unimplemented designs.
 
@@ -54,7 +55,13 @@ the LND account, wallet files, seed, or secrets remains a fund-risk scenario.
 ## API security
 
 The FastAPI agent defaults to `127.0.0.1:8088`; the local LLM defaults to
-`127.0.0.1:8089`. Do not expose either port directly to the Internet.
+`127.0.0.1:8089`; Bitcoin RPC is `127.0.0.1:8332`. Do not expose these
+services directly to the Internet.
+
+The live node intentionally exposes Bitcoin P2P on port `8333`, Lightning peer
+transport on port `9735`, and nginx on ports `80` and `443`. These listeners
+must be governed by host firewall, protocol, and authenticated reverse-proxy
+policy. Public web exposure does not authenticate the Mercury API.
 
 - Telemetry GET routes expose node status, balances, channel information,
   invoices, peers, routing, and payment history to any client that can reach
@@ -79,6 +86,11 @@ and backups under `/var/lib/mercury/backups`.
 `ProtectSystem=strict`, and explicit write paths limited to
 `/var/lib/mercury` and `/var/lib/lnd`. The agent unit is restartable and does
 not own the Bitcoin or LND service lifecycle.
+
+The live `mercury-llm.service` currently runs as `root`. Although it is
+localhost-bound, this is a privilege-reduction gap. A future hardening change
+should evaluate a dedicated unprivileged service account and verify model,
+library, and socket permissions before deployment.
 
 ## Static channel backups
 

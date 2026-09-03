@@ -1,7 +1,7 @@
 # Mercury Node Roadmap
 
 **Status:** Current plan, aligned to the live reference deployment
-**Updated:** 2026-08-23
+**Updated:** 2026-09-02
 
 The live reference node is ahead of the original v0.1 design, but the
 repository's installer and documentation still contain historical assumptions.
@@ -19,6 +19,7 @@ work; unchecked items are not promises of the current installer.
 - [x] Operational CLI for status, health, sync, channels, invoices, payments,
   routing, backups, logs, AI queries, channel operations, and diagnostics
 - [x] Backup endpoint token check and restrictive backup file permissions
+- [x] Live runtime reconciliation against the reference host on 2026-09-02
 
 Hailo-8L, Phi-3.5-mini, and the old Hailo-specific inference path are retired
 claims. They are not current milestones.
@@ -54,6 +55,8 @@ boundary.
 
 - [ ] Add deployment documentation for the observed systemd units and
   `/etc/mercury/agent.env`.
+- [ ] Reconcile the live LLM unit description and evaluate dropping its root
+  privilege without breaking model loading.
 - [ ] Document and test authenticated reverse-proxy exposure, if remote API
   access is needed.
 - [ ] Add backup restore drills and monitoring for stale static channel backups.

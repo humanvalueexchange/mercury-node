@@ -1,13 +1,14 @@
 # Mercury Node Architecture
 
 **Status:** Current repository/live contract
-**Snapshot:** 2026-08-23
+**Snapshot:** 2026-09-02
 
 ## System overview
 
 The reference node is a Debian 13 ARM64 Raspberry Pi 5-class host. The Bitcoin
 and Lightning services form the money layer; Mercury provides a local operator
-CLI, a read-oriented FastAPI service, and a local llama.cpp model service.
+CLI, a telemetry/read-and-prepare FastAPI service, and a local llama.cpp model
+service.
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
@@ -53,7 +54,17 @@ by the checked-in installer.
 
 `mercury-agent.service` uses `NoNewPrivileges`, `ProtectSystem=strict`, and
 explicit write access only to `/var/lib/mercury` and `/var/lib/lnd`. The LLM
-service binds to `127.0.0.1` and is not a public inference endpoint.
+service binds to `127.0.0.1` and is not a public inference endpoint. The live
+LLM unit currently runs as `root`; this is a hardening risk requiring separate
+deployment work.
+
+The current live listener split is:
+
+- localhost-only: agent `127.0.0.1:8088`, LLM `127.0.0.1:8089`, Bitcoin RPC
+  `127.0.0.1:8332`;
+- node-facing: Bitcoin P2P `8333` on IPv4/IPv6 and Lightning peer transport
+  `9735`;
+- web-facing: nginx on ports `80` and `443`.
 
 ## Agent API
 
@@ -75,11 +86,17 @@ The implemented FastAPI routes are:
 | GET | `/api/magma/recommend` | Read-only offer recommendations |
 | POST | `/api/magma/buy` | Creates an Amboss order; requires `MAGMA_API_KEY` |
 | GET | `/api/magma/orders` | Cached/live order status |
+| GET | `/api/tools` | Available typed operation catalog |
+| POST | `/api/tools/{name}/prepare` | Prepare a short-lived operation plan |
+| POST | `/api/tools/{name}/execute` | Confirmation-gated execution endpoint |
 
 The agent invokes `lncli --lnddir=/var/lib/lnd` as the `lnd` service user.
-The implemented node routes read LND state and export backups; the Magma buy
-route can create a remote order but returns a payment invoice for explicit
-human approval rather than paying it.
+The implemented node routes read LND state and export backups; the tool catalog
+and prepare endpoints expose operation plans. The execute endpoint does not
+execute agent-originated fund movement: it requires explicit confirmation and
+returns the approval boundary to the Mercury CLI. The Magma buy route can
+create a remote order but returns a payment invoice for explicit human
+approval rather than paying it.
 
 ## CLI architecture
 
