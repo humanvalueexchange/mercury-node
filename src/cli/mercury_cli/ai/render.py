@@ -12,6 +12,10 @@ def print_answer(question: str, answer: str) -> None:
     print(f"  A: {answer}\n")
 
 
-def debug_timings(timings: dict[str, int]) -> None:
+def debug_timings(timings: dict[str, int | str]) -> None:
     if timings:
-        print("Mercury AI timings: " + ", ".join(f"{key}={value}ms" for key, value in timings.items()), file=sys.stderr)
+        values = []
+        for key, value in timings.items():
+            suffix = "" if isinstance(value, str) else "ms"
+            values.append(f"{key}={value}{suffix}")
+        print("Mercury AI timings: " + ", ".join(values), file=sys.stderr)

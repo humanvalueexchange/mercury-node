@@ -44,6 +44,21 @@ class FakeLlama:
         return self.value
 
 
+class SlowLlama(FakeLlama):
+    async def chat(self, *_args, **_kwargs):
+        self.calls += 1
+        await asyncio.sleep(20)
+        return self.value
+
+
+class FailingMergeLlama(FakeLlama):
+    async def chat(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls > 1:
+            raise RuntimeError("merge failed")
+        return self.value
+
+
 class DualEngineTests(unittest.TestCase):
     def test_zero_channel_fast_path_uses_snapshot_only(self):
         snapshot = {
@@ -105,6 +120,30 @@ class DualEngineTests(unittest.TestCase):
             DualEngine(FakeHailo(error=RuntimeError()), FakeLlama(error=RuntimeError())).ask("q", {})
         )
         self.assertEqual(result.source, "unavailable")
+
+    def test_partial_plan_survives_slow_cpu(self):
+        result = asyncio.run(
+            DualEngine(FakeHailo(), SlowLlama()).ask("q", {})
+        )
+        self.assertEqual(result.source, "plan")
+        self.assertEqual(result.timings_ms["merge_status"], "skipped_partial")
+
+    def test_merge_failure_returns_draft(self):
+        result = asyncio.run(
+            DualEngine(FakeHailo(), FailingMergeLlama(value="Draft")).ask("q", {})
+        )
+        self.assertEqual(result.source, "draft")
+        self.assertEqual(result.timings_ms["merge_status"], "failed")
+
+    def test_debug_timing_status_has_no_ms_suffix(self):
+        from contextlib import redirect_stderr
+        from io import StringIO
+        from mercury_cli.ai.render import debug_timings
+
+        output = StringIO()
+        with redirect_stderr(output):
+            debug_timings({"merge_status": "skipped_budget"})
+        self.assertIn("merge_status=skipped_budget", output.getvalue())
 
     def test_snapshot_is_bounded_and_marks_zero_channels(self):
         config = SimpleNamespace(agent_url="http://127.0.0.1:8088")

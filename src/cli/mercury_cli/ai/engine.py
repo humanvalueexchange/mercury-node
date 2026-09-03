@@ -18,7 +18,7 @@ class AskResult:
     text: str
     source: str
     plan: dict[str, Any] | None = None
-    timings_ms: dict[str, int] = field(default_factory=dict)
+    timings_ms: dict[str, int | str] = field(default_factory=dict)
 
 
 class DualEngine:
@@ -30,17 +30,69 @@ class DualEngine:
     async def ask(self, question: str, snapshot: dict[str, Any]) -> AskResult:
         user = self._user(question, snapshot)
         started = time.monotonic()
+        deadline = started + 12.0
         plan_task = asyncio.create_task(self._plan(user))
         draft_task = asyncio.create_task(self._draft(user))
-        plan, draft = await asyncio.gather(plan_task, draft_task, return_exceptions=True)
-        plan_obj = plan if isinstance(plan, dict) else None
-        draft_text = draft.strip() if isinstance(draft, str) and draft.strip() else None
-        timings = {"parallel": round((time.monotonic() - started) * 1000)}
+        pending = {plan_task, draft_task}
+        plan_obj: dict[str, Any] | None = None
+        draft_text: str | None = None
+
+        try:
+            while pending and time.monotonic() < deadline:
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for task in done:
+                    try:
+                        value = task.result()
+                    except asyncio.CancelledError:
+                        continue
+                    except (
+                        asyncio.TimeoutError,
+                        httpx.HTTPError,
+                        KeyError,
+                        OSError,
+                        RuntimeError,
+                        TypeError,
+                        ValueError,
+                    ):
+                        continue
+                    if isinstance(value, dict):
+                        plan_obj = value
+                    elif isinstance(value, str) and value.strip():
+                        draft_text = value.strip()
+                if plan_obj and draft_text:
+                    break
+        finally:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        timings: dict[str, int | str] = {
+            "parallel": round((time.monotonic() - started) * 1000),
+        }
 
         if plan_obj and draft_text:
-            merged = await self._merge(question, snapshot, plan_obj, draft_text)
+            remaining = deadline - time.monotonic()
+            if remaining >= 3.0:
+                merge_started = time.monotonic()
+                merged = await self._merge(
+                    question, snapshot, plan_obj, draft_text, timeout=remaining
+                )
+                timings["merge"] = round((time.monotonic() - merge_started) * 1000)
+                timings["merge_status"] = "ran" if merged else "failed"
+            else:
+                merged = ""
+                timings["merge_status"] = "skipped_budget"
             if merged:
                 return AskResult(merged, "merge", plan_obj, timings)
+        elif plan_obj or draft_text:
+            timings["merge_status"] = "skipped_partial"
         if draft_text:
             return AskResult(draft_text, "draft", plan_obj, timings)
         if plan_obj:
@@ -70,7 +122,12 @@ class DualEngine:
         )
 
     async def _merge(
-        self, question: str, snapshot: dict[str, Any], plan: dict[str, Any], draft: str
+        self,
+        question: str,
+        snapshot: dict[str, Any],
+        plan: dict[str, Any],
+        draft: str,
+        timeout: float = 5.0,
     ) -> str:
         user = (
             f"QUESTION:\n{question}\n\nSNAPSHOT:\n"
@@ -83,10 +140,17 @@ class DualEngine:
                     [{"role": "system", "content": MERGE_SYS}, {"role": "user", "content": user}],
                     max_tokens=96,
                 ),
-                timeout=5,
+                timeout=min(5.0, timeout),
             )
             return result.strip()
-        except (asyncio.TimeoutError, httpx.HTTPError, KeyError, TypeError, ValueError):
+        except (
+            asyncio.TimeoutError,
+            httpx.HTTPError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
             return ""
 
     @staticmethod
