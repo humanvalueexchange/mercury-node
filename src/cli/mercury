@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/mercury/venv/bin/python
 """
 Mercury Node CLI — v0.5.5
 Terminal-native control for your sovereign Bitcoin Lightning node.
