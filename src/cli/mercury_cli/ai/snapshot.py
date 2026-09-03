@@ -151,11 +151,34 @@ def prompt_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "active": channel.get("active"),
                 }
             )
+    chain = snapshot.get("chain")
+    wallet = snapshot.get("wallet")
+    totals = snapshot.get("totals")
     return {
-        "chain": snapshot.get("chain", {}),
-        "wallet": snapshot.get("wallet", {}),
+        "chain": {
+            key: chain[key]
+            for key in ("height", "synced")
+            if isinstance(chain, dict) and key in chain
+        },
+        "wallet": {
+            key: wallet[key]
+            for key in ("confirmed_sat", "unconfirmed_sat")
+            if isinstance(wallet, dict) and key in wallet
+        },
         "channels": compact_channels,
-        "totals": snapshot.get("totals", {}),
-        "notes": snapshot.get("notes", []),
+        "totals": {
+            key: totals[key]
+            for key in (
+                "active",
+                "local_sat",
+                "remote_sat",
+                "inbound_pct",
+                "outbound_pct",
+            )
+            if isinstance(totals, dict) and key in totals
+        },
+        "notes": [
+            note for note in snapshot.get("notes", []) if isinstance(note, str)
+        ],
         "fresh": snapshot.get("fresh", False),
     }

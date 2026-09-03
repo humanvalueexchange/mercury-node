@@ -53,6 +53,16 @@ class SlowLlama(FakeLlama):
         return self.value
 
 
+class LateDualEngine(DualEngine):
+    async def _plan(self, _user):
+        await asyncio.sleep(9.5)
+        return PLAN
+
+    async def _draft(self, _user):
+        await asyncio.sleep(9.5)
+        return "Draft"
+
+
 class FailingMergeLlama(FakeLlama):
     async def chat(self, *_args, **_kwargs):
         self.calls += 1
@@ -175,6 +185,13 @@ class DualEngineTests(unittest.TestCase):
         self.assertEqual(result.source, "draft")
         self.assertEqual(result.timings_ms["merge_status"], "failed")
 
+    def test_merge_is_skipped_when_global_budget_is_low(self):
+        result = asyncio.run(
+            LateDualEngine(FakeHailo(), FakeLlama()).ask("q", {})
+        )
+        self.assertEqual(result.source, "draft")
+        self.assertEqual(result.timings_ms["merge_status"], "skipped_budget")
+
     def test_debug_timing_status_has_no_ms_suffix(self):
         from contextlib import redirect_stderr
         from io import StringIO
@@ -210,6 +227,16 @@ class DualEngineTests(unittest.TestCase):
         self.assertEqual(projected["channels"][0]["alias"], "peer")
         self.assertNotIn("initiator", projected["channels"][0])
         self.assertEqual(projected["wallet"]["confirmed_sat"], 2)
+
+    def test_prompt_snapshot_drops_unapproved_secret_like_fields(self):
+        projected = prompt_snapshot({
+            "wallet": {"confirmed_sat": 2, "macaroon": "secret"},
+            "seed": "secret",
+            "fresh": True,
+        })
+        encoded = __import__("json").dumps(projected)
+        self.assertNotIn("macaroon", encoded)
+        self.assertNotIn("seed", encoded)
 
 
 if __name__ == "__main__":

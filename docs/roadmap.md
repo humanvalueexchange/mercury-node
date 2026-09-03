@@ -19,8 +19,12 @@ work; unchecked items are not promises of the current installer.
 - [x] Operational CLI for status, health, sync, channels, invoices, payments,
   routing, backups, logs, AI queries, channel operations, and diagnostics
 - [x] Backup endpoint token check and restrictive backup file permissions
-- [ ] Implement approved Hailo + CPU split reasoning path (repository branch;
-  live installation and model pull require separate approval)
+- [x] Implement approved Hailo + CPU split reasoning path on the controlled
+  repository branch, including bounded snapshots, deterministic status
+  fast-paths, deadline-aware fallbacks, Hailo readiness/prewarm units, and
+  schema validation
+- [ ] Validate and promote the split path on the live host; service enablement,
+  model/runtime changes, and promotion gates require separate approval
 
 Hailo-8L, Phi-3.5-mini, and the old Hailo-specific inference path are retired
 claims. They are not current milestones.
@@ -51,6 +55,16 @@ claims. They are not current milestones.
 
 The registry is currently a partial refactor, not a complete authorization
 boundary.
+
+### Local AI split status
+
+The repository implementation is complete through the offline validation and
+documentation phase on the controlled `luna/mercury-hailo-cpu-split` branch.
+The CPU draft and merge path retains the approved native llama-server contract;
+merge is optional only when the 12-second global deadline cannot accommodate
+it. Three closed snapshot-only status cases may bypass inference when their
+required fresh fields are present. Live Hailo residency, warm latency, soak,
+thermal, zram, and money-layer regression gates remain open.
 
 ### Operational hardening
 
