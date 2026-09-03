@@ -130,3 +130,32 @@ class SnapshotBuilder:
         while channels and len(json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True)) > 4096:
             channels.pop()
         return snapshot
+
+
+def prompt_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Project the validated snapshot into a compact, model-facing shape."""
+    channels = snapshot.get("channels")
+    compact_channels = []
+    if isinstance(channels, list):
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+            compact_channels.append(
+                {
+                    "alias": channel.get("alias"),
+                    "chan_id": channel.get("chan_id"),
+                    "capacity_sat": channel.get("capacity_sat"),
+                    "local_sat": channel.get("local_sat"),
+                    "remote_sat": channel.get("remote_sat"),
+                    "local_pct": channel.get("local_pct"),
+                    "active": channel.get("active"),
+                }
+            )
+    return {
+        "chain": snapshot.get("chain", {}),
+        "wallet": snapshot.get("wallet", {}),
+        "channels": compact_channels,
+        "totals": snapshot.get("totals", {}),
+        "notes": snapshot.get("notes", []),
+        "fresh": snapshot.get("fresh", False),
+    }

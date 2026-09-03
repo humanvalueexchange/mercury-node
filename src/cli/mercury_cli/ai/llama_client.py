@@ -27,6 +27,7 @@ class LlamaClient:
             "stream": False,
             "max_tokens": max_tokens,
             "temperature": 0.3,
+            "cache_prompt": True,
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(

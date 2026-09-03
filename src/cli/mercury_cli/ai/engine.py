@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from mercury_cli.ai.snapshot import prompt_snapshot
 from mercury_cli.prompts import DRAFT_SYS, MERGE_SYS, PLAN_SYS
 
 
@@ -116,7 +117,7 @@ class DualEngine:
         return await asyncio.wait_for(
             self.llama.chat(
                 [{"role": "system", "content": DRAFT_SYS}, {"role": "user", "content": user}],
-                max_tokens=96,
+                max_tokens=80,
             ),
             timeout=8,
         )
@@ -131,14 +132,14 @@ class DualEngine:
     ) -> str:
         user = (
             f"QUESTION:\n{question}\n\nSNAPSHOT:\n"
-            f"{json.dumps(snapshot, separators=(',', ':'))}\n\nPLAN:\n"
+            f"{json.dumps(prompt_snapshot(snapshot), separators=(',', ':'))}\n\nPLAN:\n"
             f"{json.dumps(plan, separators=(',', ':'))}\n\nDRAFT:\n{draft}"
         )
         try:
             result = await asyncio.wait_for(
                 self.llama.chat(
                     [{"role": "system", "content": MERGE_SYS}, {"role": "user", "content": user}],
-                    max_tokens=96,
+                    max_tokens=48,
                 ),
                 timeout=min(5.0, timeout),
             )
@@ -157,5 +158,5 @@ class DualEngine:
     def _user(question: str, snapshot: dict[str, Any]) -> str:
         return (
             f"QUESTION:\n{question}\n\nSNAPSHOT:\n"
-            f"```json\n{json.dumps(snapshot, separators=(',', ':'))}\n```"
+            f"```json\n{json.dumps(prompt_snapshot(snapshot), separators=(',', ':'))}\n```"
         )

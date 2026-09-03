@@ -7,7 +7,7 @@ from pathlib import Path
 from mercury_cli.ai.engine import DualEngine
 from mercury_cli.ai.fast_path import deterministic_reply
 from mercury_cli.ai.hailo_client import HailoClient
-from mercury_cli.ai.snapshot import SnapshotBuilder
+from mercury_cli.ai.snapshot import SnapshotBuilder, prompt_snapshot
 
 
 PLAN = {
@@ -166,6 +166,20 @@ class DualEngineTests(unittest.TestCase):
         snapshot = builder.build()
         self.assertLessEqual(len(__import__("json").dumps(snapshot, separators=(",", ":"))), 4096)
         self.assertIn("zero_channels", snapshot["notes"])
+
+    def test_prompt_snapshot_keeps_facts_and_removes_unused_channel_fields(self):
+        snapshot = {
+            "chain": {"height": 1, "synced": True},
+            "wallet": {"confirmed_sat": 2, "unconfirmed_sat": 3},
+            "channels": [{"alias": "peer", "chan_id": "1", "active": True, "initiator": True}],
+            "totals": {"active": 1},
+            "notes": [],
+            "fresh": True,
+        }
+        projected = prompt_snapshot(snapshot)
+        self.assertEqual(projected["channels"][0]["alias"], "peer")
+        self.assertNotIn("initiator", projected["channels"][0])
+        self.assertEqual(projected["wallet"]["confirmed_sat"], 2)
 
 
 if __name__ == "__main__":
