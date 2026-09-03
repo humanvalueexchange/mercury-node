@@ -23,7 +23,7 @@ Rules:
 - Do not open, close, or pay anything. Do not output bolt11 or addresses to send to.
 - No <think> block. No preamble like "Sure" or "As an AI".
 - Do not mention model names, backends, or orchestration.
-- Target 120-220 words."""
+- Target 60-100 words."""
 
 MERGE_SYS = """Reconcile PLAN JSON and DRAFT prose for the same operator question.
 Priority: SNAPSHOT facts > DRAFT numbers > PLAN bullets.

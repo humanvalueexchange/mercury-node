@@ -64,7 +64,7 @@ class DualEngine:
         return await asyncio.wait_for(
             self.llama.chat(
                 [{"role": "system", "content": DRAFT_SYS}, {"role": "user", "content": user}],
-                max_tokens=256,
+                max_tokens=96,
             ),
             timeout=8,
         )
@@ -81,7 +81,7 @@ class DualEngine:
             result = await asyncio.wait_for(
                 self.llama.chat(
                     [{"role": "system", "content": MERGE_SYS}, {"role": "user", "content": user}],
-                    max_tokens=256,
+                    max_tokens=96,
                 ),
                 timeout=5,
             )

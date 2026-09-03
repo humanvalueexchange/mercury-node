@@ -47,6 +47,16 @@ class HailoClient:
             return None
         if not isinstance(value, dict):
             return None
+        aliases = {
+            "tooling_needed": "need_tools",
+            "blist": "bullets",
+            "recommendation": "recommended_action",
+        }
+        if "recommendation" in value and isinstance(value["recommendation"], dict):
+            value["recommendation"] = value["recommendation"].get("action")
+        for source, target in aliases.items():
+            if target not in value and source in value:
+                value[target] = value[source]
         required = {"intent", "need_tools", "risks", "bullets", "answer_sketch", "recommended_action"}
         if not required.issubset(value):
             return None
