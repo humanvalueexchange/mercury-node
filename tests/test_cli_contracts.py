@@ -3,6 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import AsyncMock
 from importlib.machinery import SourceFileLoader
 
 
@@ -21,6 +22,36 @@ cli = load_cli()
 
 
 class CliParserDispatchTests(unittest.TestCase):
+    def test_ask_skips_hailo_when_readiness_is_unavailable(self):
+        config = type(
+            "Config",
+            (),
+            {
+                "split_ai": True,
+                "hailo_url": "http://127.0.0.1:8000",
+                "hailo_model": "model",
+                "hailo_ready_file": "/run/hailo-ollama/ready",
+                "local_llm_url": "http://127.0.0.1:8089",
+                "local_llm_model": "model",
+                "allow_dgx": False,
+                "ai_debug": False,
+            },
+        )()
+        with patch.object(cli, "load_config", return_value=config), patch.object(
+            cli.SnapshotBuilder, "build", return_value={"fresh": True}
+        ), patch.object(cli, "deterministic_reply", return_value=None), patch.object(
+            cli.HailoClient, "ready", return_value=False
+        ), patch.object(cli.LlamaClient, "healthy", return_value=True), patch.object(
+            cli.LlamaClient, "chat", new_callable=AsyncMock, return_value="Draft"
+        ), patch.object(cli.HailoClient, "chat", new_callable=AsyncMock) as hailo_chat, patch.object(
+            cli, "print_answer"
+        ) as answer:
+            result = cli.cmd_ask(type("Args", (), {"question": ["status", "summary"]})())
+
+        self.assertEqual(result, 0)
+        hailo_chat.assert_not_called()
+        self.assertEqual(answer.call_args.args[1], "Draft")
+
     def test_write_tools_are_confirmation_gated(self):
         for name in (
             "payment.pay",

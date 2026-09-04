@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 from mercury_cli.ai.engine import DualEngine
 from mercury_cli.ai.fast_path import deterministic_reply
@@ -79,6 +80,13 @@ class DualEngineTests(unittest.TestCase):
             self.assertFalse(client.ready())
             Path(directory, "ready").touch()
             self.assertTrue(client.ready())
+
+    def test_hailo_ready_treats_inaccessible_marker_as_not_ready(self):
+        client = HailoClient("http://127.0.0.1:8000", "model")
+        with patch.object(Path, "is_file", side_effect=PermissionError):
+            with patch.object(client, "healthy") as healthy:
+                self.assertFalse(client.ready())
+                healthy.assert_not_called()
 
     def test_zero_channel_fast_path_uses_snapshot_only(self):
         snapshot = {

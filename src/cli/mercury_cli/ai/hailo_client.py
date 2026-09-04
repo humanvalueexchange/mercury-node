@@ -44,7 +44,11 @@ class HailoClient:
 
     def ready(self) -> bool:
         """Require both an HTTP service and a completed model prewarm."""
-        return self.ready_file.is_file() and self.healthy()
+        try:
+            marker_present = self.ready_file.is_file()
+        except (PermissionError, FileNotFoundError, NotADirectoryError):
+            return False
+        return marker_present and self.healthy()
 
     async def chat(
         self, messages: list[dict[str, str]], num_predict: int = 200

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import grp
 import os
 import tempfile
 import urllib.request
@@ -41,6 +42,8 @@ def main() -> int:
     ) as marker:
         marker.write(b"ready\n")
         temporary = Path(marker.name)
+    os.chown(temporary, -1, grp.getgrnam("mercury-ready").gr_gid)
+    temporary.chmod(0o640)
     temporary.replace(READY_FILE)
     return 0
 

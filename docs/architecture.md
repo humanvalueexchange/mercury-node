@@ -58,6 +58,13 @@ non-sensitive prewarm writes the systemd-lifecycle readiness marker under
 cold model loading on an operator request; the checked-in prewarm service and
 timer do not authorize live enablement by themselves.
 
+The readiness marker is intentionally separate from the Hailo model and data
+directories. On hosts using the split deployment, a dedicated `mercury-ready`
+group grants only `hailo-ollama` and the approved CLI operator read/traverse
+access to `/run/hailo-ollama/ready`; the operator must not join the
+`hailo-ollama` group. The CLI treats an absent or inaccessible marker as Hailo
+not ready and falls through to the approved CPU or unavailable path.
+
 `mercury-agent.service` uses `NoNewPrivileges`, `ProtectSystem=strict`, and
 explicit write access only to `/var/lib/mercury` and `/var/lib/lnd`. The LLM
 service binds to `127.0.0.1` and is not a public inference endpoint.
