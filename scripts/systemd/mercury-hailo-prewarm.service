@@ -6,8 +6,8 @@ Requires=hailo-ollama.service
 [Service]
 Type=oneshot
 User=hailo-ollama
-Group=hailo-ollama
-SupplementaryGroups=mercury-ready
+Group=mercury-ready
+SupplementaryGroups=hailo-ollama
 Environment=MERCURY_HAILO_URL=http://127.0.0.1:8000
 Environment=MERCURY_HAILO_MODEL=qwen2.5-instruct:1.5b
 Environment=MERCURY_HAILO_READY_FILE=/run/hailo-ollama/ready

@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=hailo-ollama
-Group=hailo-ollama
-SupplementaryGroups=mercury-ready
+Group=mercury-ready
+SupplementaryGroups=hailo-ollama
 RuntimeDirectory=hailo-ollama
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=no
@@ -17,8 +17,6 @@ Environment=OLLAMA_KEEP_ALIVE=-1
 # Verify the package-provided path on the target host before enablement.
 ExecStartPre=/usr/bin/rm -f /run/hailo-ollama/ready
 ExecStart=/usr/bin/hailo-ollama serve
-ExecStartPost=+/usr/bin/chgrp mercury-ready /run/hailo-ollama
-ExecStartPost=+/usr/bin/chmod 0750 /run/hailo-ollama
 Restart=always
 RestartSec=5
 
