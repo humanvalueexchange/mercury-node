@@ -11,8 +11,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13"
+      - name: Install x402 Watch test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-x402-watch-dev.txt
+      - name: Lint x402 Watch
+        run: python -m ruff check src/x402_watch tests/test_x402_watch.py
       - name: Run unit tests
         env:
-          PYTHONPATH: src/cli:src/agent
+          PYTHONPATH: src:src/cli:src/agent
         run: python -m unittest discover -s tests -p 'test*.py' -v
