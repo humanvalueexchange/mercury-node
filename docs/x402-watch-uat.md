@@ -62,6 +62,16 @@ service creation, repository creation, GitHub write, or timer enablement.
   be determined. This follow-up records fixed fetch-failure categories and
   HTTP status codes without embedding URLs, response text, or credentials in
   diagnostics.
+- The 2026-10-25 retry after PR #12 (run
+  `b4240405a6f84706a435ccd70bea2099`) again completed all Brave searches but
+  had three fetch failures: one stablecoin/card-volume HTTP 403, plus one
+  Stripe/OpenRouter HTTP 403 and one response over the 2,000,000-byte cap.
+  Hailo triage failed, while CPU synthesis continued for about 19 minutes.
+  Editorial validation rejected a claim with an unknown source ID; the retry
+  created no new brief and did not publish. This follow-up constrains generated
+  citation IDs to supplied claimable evidence and includes sanitized run
+  diagnostics in rejection errors. It does not relax fetch limits or bypass
+  HTTP 403 responses.
 - No recurring job or GitHub publication is enabled. Publication remains
   blocked until the private target repository and scoped credentials are
   provisioned and separately approved.
@@ -160,6 +170,11 @@ future-dated runs are rejected.
 - Local run diagnostics expose fixed source-fetch failure categories (and HTTP
   status codes when available) without embedding URLs or response text in
   diagnostic entries.
+- Local draft generation constrains claim and held-item citations to supplied
+  claimable source IDs; with no claimable evidence, the model schema permits no
+  generated items. Editorial validation remains fail-closed.
+- Rejected-draft CLI errors include the run ID and sanitized diagnostics, never
+  source URLs, response text, or credentials.
 - A first complete run is marked as a baseline; no-change is allowed only on a
   later complete run.
 - Factual claims with unknown citations, unapproved future-year proposals,

@@ -336,8 +336,12 @@ class DailyPipeline:
                 coverage_complete,
                 errors + [f"draft:{failure_detail}"],
             )
+            run_context = f"run {run_id}"
+            if errors:
+                run_context += f"; diagnostics: {', '.join(errors)}"
             raise PipelineError(
-                f"Generated brief failed editorial validation: {failure_detail}"
+                f"Generated brief failed editorial validation: {failure_detail} "
+                f"({run_context})"
             ) from exc
         except Exception:
             self._store.finish_run(
