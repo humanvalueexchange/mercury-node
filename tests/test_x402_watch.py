@@ -822,6 +822,26 @@ class _FixtureWriter:
         return DraftBrief(no_material_change=True)
 
 
+class _InvalidDraftWriter:
+    def write(
+        self,
+        brief_date: date,
+        sources: list[EvidenceSource],
+        coverage_complete: bool,
+        baseline: bool,
+    ) -> DraftBrief:
+        return DraftBrief(
+            claims=[
+                DraftClaim(
+                    text="A synthetic claim has an unknown citation.",
+                    source_ids=["unknown-source"],
+                    uncertainty="This is a fixture-only policy test.",
+                    why_it_matters="It verifies useful rejection reporting.",
+                )
+            ]
+        )
+
+
 class PipelineTests(unittest.TestCase):
     def test_daily_pipeline_rejects_backdated_runs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -865,6 +885,26 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("no material change", second_text.lower())
             self.assertIn("unchanged", second_text)
             store.close()
+
+    def test_policy_rejection_reports_the_safe_policy_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(data_dir=Path(directory))
+            store = Store(settings.database_path)
+            pipeline = DailyPipeline(
+                settings,
+                store,
+                _FakeSearch(),
+                _FakeFetcher(),
+                _InvalidDraftWriter(),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    PipelineError,
+                    "PolicyError: A claim cites an unknown source ID",
+                ):
+                    pipeline.run(date.today())
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

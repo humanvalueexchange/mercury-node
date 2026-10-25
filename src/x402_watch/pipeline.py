@@ -307,15 +307,20 @@ class DailyPipeline:
                 claim_source_ids={source.source_id for source in evidence_sources},
             )
         except (PolicyError, ValueError) as exc:
+            failure_detail = (
+                f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, PolicyError)
+                else type(exc).__name__
+            )
             self._store.finish_run(
                 run_id,
                 _iso(datetime.now(UTC)),
                 "rejected",
                 coverage_complete,
-                errors + [f"draft:{type(exc).__name__}"],
+                errors + [f"draft:{failure_detail}"],
             )
             raise PipelineError(
-                f"Generated brief failed editorial validation: {type(exc).__name__}"
+                f"Generated brief failed editorial validation: {failure_detail}"
             ) from exc
         except Exception:
             self._store.finish_run(
