@@ -1,0 +1,49 @@
+[Unit]
+Description=Mercury x402 Watch daily research and private publishing
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/opt/x402-watch/venv/bin/python
+ConditionPathExists=/opt/x402-watch/models/Qwen3-4B-Q4_K_M.gguf
+
+[Service]
+Type=oneshot
+User=x402-watch
+Group=x402-watch
+WorkingDirectory=/opt/x402-watch/app
+EnvironmentFile=/etc/x402-watch/x402-watch.env
+Environment=PYTHONPATH=/opt/x402-watch/app/src
+Environment=X402_WATCH_DATA_DIR=/var/lib/x402-watch
+Environment=X402_WATCH_LLAMA_SERVER=/opt/x402-watch/llama.cpp/build/bin/llama-server
+Environment=X402_WATCH_LLAMA_MODEL=/opt/x402-watch/models/Qwen3-4B-Q4_K_M.gguf
+Environment=X402_WATCH_HAILO_MODEL=/opt/x402-watch/models/Qwen2.5-1.5B-Instruct-v5.1.1.hef
+Environment=X402_WATCH_HAILO_PYTHON=/usr/bin/python3
+LoadCredential=brave_api_key:/etc/x402-watch/credentials/brave_api_key
+LoadCredential=github_app_private_key:/etc/x402-watch/credentials/github_app_private_key.pem
+StateDirectory=x402-watch
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/x402-watch
+InaccessiblePaths=-/mnt -/media -/run/media -/srv
+LimitNOFILE=4096
+ExecStart=/opt/x402-watch/venv/bin/python -m x402_watch.cli run --publish
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Mercury x402 Watch run
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=10min
+Unit=x402-watch.service
+
+[Install]
+WantedBy=timers.target
