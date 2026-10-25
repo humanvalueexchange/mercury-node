@@ -1,12 +1,16 @@
-# Mercury Node — Current Reference Deployment
+# Mercury Node — Historical Deployment Snapshot
 
 **Snapshot date:** 2026-08-23  
 **Host:** `mercury2`  
-**Purpose:** Authoritative hardware and software snapshot of the currently operated Mercury node.
+**Purpose:** Historical hardware and software snapshot of Mercury as of 2026-08-23.
 
-This document describes the live reference deployment. It is intentionally separate from the
-original target BOM and architecture documents so that historical design assumptions remain
-traceable while operational documentation stays accurate.
+This document preserves the dated reference deployment separately from the original target BOM
+and architecture documents. It is not a current service-status report.
+
+> The hardware was re-inventoried on 2026-10-24; see
+> [hardware-inventory.md](hardware-inventory.md). Since the 2026-08-23 snapshot, Mercury's
+> `bitcoind`, `lnd`, `nbxplorer`, and `btcpayserver` services were stopped and disabled, with
+> their data left on disk.
 
 ## Hardware
 

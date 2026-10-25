@@ -1,16 +1,20 @@
 # Mercury Node
 
 Mercury Node is a self-hosted Bitcoin and Lightning operator console with a local
-AI assistant. The current reference deployment is a **Debian GNU/Linux 13
+AI assistant. Its documented reference host is a **Debian GNU/Linux 13
 (trixie), ARM64 Raspberry Pi 5-class node** with a Hailo-10H PCIe accelerator.
 
 > **Deployment status:** This repository is under active development. The live
 > reference host and the checked-in installer are not identical; do not use the
 > installer with production funds without reviewing its limitations below.
+>
+> **Operations update (2026-10-24):** Mercury's Bitcoin/Lightning services were
+> stopped and disabled during cutover; their data remains on disk. See the
+> [hardware inventory](docs/hardware-inventory.md) for the current Mercury asset record.
 
-## Current reference stack
+## Reference stack
 
-| Layer | Current contract |
+| Layer | Reference contract |
 |---|---|
 | Operating system | Debian 13 (trixie), `aarch64`/ARM64 |
 | Hardware | Raspberry Pi 5-class ARM64 host, 16 GiB RAM |
@@ -24,9 +28,10 @@ AI assistant. The current reference deployment is a **Debian GNU/Linux 13
 | Application layout | `/opt/mercury` |
 | Supporting services | NBXplorer, BTCPay Server, nginx |
 
-See [docs/current-state.md](docs/current-state.md) for the dated live snapshot,
-[docs/architecture.md](docs/architecture.md) for service boundaries, and
-[docs/hardware-bom.md](docs/hardware-bom.md) for the reference hardware.
+See [docs/hardware-inventory.md](docs/hardware-inventory.md) for Mercury's asset
+record, [docs/current-state.md](docs/current-state.md) for the dated software
+snapshot, [docs/architecture.md](docs/architecture.md) for service boundaries,
+and [docs/hardware-bom.md](docs/hardware-bom.md) for the reference hardware.
 
 The controlled split-inference branch includes Hailo readiness/prewarm units,
 deadline-aware CPU merge fallback, and three narrowly bounded snapshot-only

@@ -9,6 +9,10 @@ The reference node is a Debian 13 ARM64 Raspberry Pi 5-class host. The Bitcoin
 and Lightning services form the money layer; Mercury provides a local operator
 CLI, a read-oriented FastAPI service, and a local llama.cpp model service.
 
+> As of 2026-10-24, Mercury's `bitcoind`, `lnd`, `nbxplorer`, and `btcpayserver`
+> services are stopped and disabled; their data remains on disk. See the
+> [hardware inventory](hardware-inventory.md) for the verified board and current role.
+
 ```text
 ┌──────────────────────────────────────────────────────────┐
 │ Operator                                                │
