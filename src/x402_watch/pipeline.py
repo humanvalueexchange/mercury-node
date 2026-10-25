@@ -23,7 +23,12 @@ from .models import (
     Lane,
     SearchHit,
 )
-from .policy import PolicyError, route_sensitive_sources, validate_draft
+from .policy import (
+    PolicyError,
+    route_sensitive_sources,
+    source_requires_human_routing,
+    validate_draft,
+)
 from .render import render_brief
 from .sources import (
     FetchedPage,
@@ -282,6 +287,11 @@ class DailyPipeline:
         coverage_complete = all(query_success.values()) and not source_failures
         sources.sort(key=_source_priority)
         evidence_sources = _deduplicate_evidence(sources)
+        claimable_sources = [
+            source
+            for source in evidence_sources
+            if not source_requires_human_routing(source)
+        ]
         if self._tagger is None:
             lane_status["hailo-triage"] = "not configured; CPU path only"
         elif tagger_failed:
@@ -294,7 +304,7 @@ class DailyPipeline:
         try:
             draft = self._writer.write(
                 target_date,
-                evidence_sources,
+                claimable_sources,
                 coverage_complete,
                 baseline,
             )
@@ -304,7 +314,9 @@ class DailyPipeline:
                 sources,
                 coverage_complete,
                 baseline,
-                claim_source_ids={source.source_id for source in evidence_sources},
+                claim_source_ids={
+                    source.source_id for source in claimable_sources
+                },
             )
         except (PolicyError, ValueError) as exc:
             failure_detail = (
