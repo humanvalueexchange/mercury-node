@@ -26,6 +26,8 @@ AI assistant. The current reference deployment is a **Debian GNU/Linux 13
 See [docs/current-state.md](docs/current-state.md) for the dated live snapshot,
 [docs/architecture.md](docs/architecture.md) for service boundaries, and
 [docs/hardware-bom.md](docs/hardware-bom.md) for the reference hardware.
+The proposed, not-yet-deployed local research and publishing workflow is
+documented in [docs/x402-watch-design.md](docs/x402-watch-design.md).
 
 ## Layout
 
