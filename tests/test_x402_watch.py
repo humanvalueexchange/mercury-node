@@ -271,6 +271,7 @@ class LocalPromptTests(unittest.TestCase):
 
         def handler(request):
             captured.update(json.loads(request.read()))
+            captured["request_timeout"] = request.extensions.get("timeout")
             return httpx.Response(
                 200,
                 json={
@@ -309,6 +310,8 @@ class LocalPromptTests(unittest.TestCase):
             captured["chat_template_kwargs"],
             {"enable_thinking": False},
         )
+        self.assertEqual(captured["max_tokens"], 2600)
+        self.assertEqual(captured["request_timeout"]["read"], 2400.0)
         self.assertNotIn("url", evidence)
         self.assertEqual(len(evidence["title"]), 180)
         self.assertEqual(len(evidence["publisher"]), 80)
@@ -334,6 +337,22 @@ class LocalPromptTests(unittest.TestCase):
         try:
             with self.assertRaises(LocalModelError):
                 writer._write(date.today(), [source] * 40, True, False)
+        finally:
+            writer.close()
+            client.close()
+
+    def test_writer_reports_cpu_inference_timeout(self):
+        def handler(request):
+            raise httpx.ReadTimeout("timed out")
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        writer = LlamaDraftWriter(Settings(), client=client)
+        try:
+            with self.assertRaisesRegex(
+                LocalModelError,
+                "inference timed out after 2400s",
+            ):
+                writer._write(date.today(), [make_source()], True, False)
         finally:
             writer.close()
             client.close()

@@ -77,7 +77,7 @@ class Settings:
     max_source_bytes: int = 2_000_000
     max_redirects: int = 4
     fetch_timeout_seconds: float = 20.0
-    model_timeout_seconds: float = 240.0
+    model_timeout_seconds: float = 2400.0
 
     @classmethod
     def from_env(
