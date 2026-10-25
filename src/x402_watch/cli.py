@@ -45,10 +45,16 @@ def _parser() -> argparse.ArgumentParser:
         "check-models",
         help="run bounded local CPU and Hailo inference checks",
     )
-    check_parser.add_argument(
+    model_check_options = check_parser.add_mutually_exclusive_group()
+    model_check_options.add_argument(
         "--skip-hailo",
         action="store_true",
         help="check llama.cpp only",
+    )
+    model_check_options.add_argument(
+        "--skip-cpu",
+        action="store_true",
+        help="check Hailo only",
     )
     retry_parser = commands.add_parser(
         "retry-publish",
@@ -140,46 +146,54 @@ def _print_warnings(warnings: tuple[str, ...]) -> None:
 
 
 def _check_models(args: argparse.Namespace, settings: Settings) -> int:
-    if not settings.llama_server.is_file():
-        raise LocalModelError("llama-server binary is missing")
-    if not settings.llama_model.is_file():
-        raise LocalModelError("The configured local GGUF model is missing")
-    started = time.monotonic()
-    with LocalLlamaServer(settings), httpx.Client(
-        timeout=settings.model_timeout_seconds,
-        trust_env=False,
-    ) as client:
-        try:
-            response = client.post(
-                f"{settings.llama_url}/v1/chat/completions",
-                json={
-                    "model": "local",
-                    "temperature": 0,
-                    "max_tokens": 8,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": 'Reply with the single word "ready".',
-                        }
-                    ],
-                },
-            )
-        except httpx.HTTPError as exc:
-            raise LocalModelError("CPU inference self-check failed") from exc
-        if response.status_code != 200:
-            raise LocalModelError(
-                f"CPU inference self-check returned HTTP {response.status_code}"
-            )
-        try:
-            content = response.json()["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise LocalModelError(
-                "CPU inference self-check returned an invalid response"
-            ) from exc
-        if not isinstance(content, str) or not content.strip():
-            raise LocalModelError("CPU inference self-check returned an empty response")
-    print(f"llama.cpp CPU inference: passed in {time.monotonic() - started:.1f}s")
+    if args.skip_cpu:
+        print("CPU inference: skipped by request")
+    else:
+        if not settings.llama_server.is_file():
+            raise LocalModelError("llama-server binary is missing")
+        if not settings.llama_model.is_file():
+            raise LocalModelError("The configured local GGUF model is missing")
+        started = time.monotonic()
+        with (
+            LocalLlamaServer(settings),
+            httpx.Client(
+                timeout=settings.model_timeout_seconds,
+                trust_env=False,
+            ) as client,
+        ):
+            try:
+                response = client.post(
+                    f"{settings.llama_url}/v1/chat/completions",
+                    json={
+                        "model": "local",
+                        "temperature": 0,
+                        "max_tokens": 8,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": 'Reply with the single word "ready".',
+                            }
+                        ],
+                    },
+                )
+            except httpx.HTTPError as exc:
+                raise LocalModelError("CPU inference self-check failed") from exc
+            if response.status_code != 200:
+                raise LocalModelError(
+                    f"CPU inference self-check returned HTTP {response.status_code}"
+                )
+            try:
+                content = response.json()["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise LocalModelError(
+                    "CPU inference self-check returned an invalid response"
+                ) from exc
+            if not isinstance(content, str) or not content.strip():
+                raise LocalModelError(
+                    "CPU inference self-check returned an empty response"
+                )
+        print(f"llama.cpp CPU inference: passed in {time.monotonic() - started:.1f}s")
 
     if args.skip_hailo:
         print("Hailo inference: skipped by request")

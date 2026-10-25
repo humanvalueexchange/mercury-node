@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from x402_watch.brave import BraveSearchClient
-from x402_watch.cli import _check_models, _print_warnings
+from x402_watch.cli import _check_models, _parser, _print_warnings
 from x402_watch.config import ConfigurationError, Settings
 from x402_watch.db import Store
 from x402_watch.hailo import HailoWorker, HailoWorkerError
@@ -680,7 +680,7 @@ class ModelCheckTests(unittest.TestCase):
                     patch("x402_watch.cli.httpx.Client", return_value=client),
                 ):
                     result = _check_models(
-                        Namespace(skip_hailo=True),
+                        Namespace(skip_cpu=False, skip_hailo=True),
                         Settings(llama_server=server, llama_model=model),
                     )
             finally:
@@ -698,6 +698,45 @@ class ModelCheckTests(unittest.TestCase):
     def test_check_models_rejects_empty_model_content(self):
         with self.assertRaisesRegex(LocalModelError, "empty response"):
             self._run_check("")
+
+    def test_check_models_can_run_hailo_only_without_cpu_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hailo_model = Path(directory) / "model.hef"
+            hailo_model.touch()
+            missing = Path(directory) / "missing"
+            worker = Mock()
+            worker.classify.return_value = HailoTag(relevance="uncertain")
+            settings = Settings(
+                llama_server=missing,
+                llama_model=missing,
+                hailo_model=hailo_model,
+            )
+            output = io.StringIO()
+            with (
+                patch(
+                    "x402_watch.cli.HailoWorker",
+                    return_value=nullcontext(worker),
+                ),
+                patch("x402_watch.cli.LocalLlamaServer") as cpu_server,
+                patch("sys.stdout", output),
+            ):
+                result = _check_models(
+                    Namespace(skip_cpu=True, skip_hailo=False),
+                    settings,
+                )
+
+        self.assertEqual(result, 0)
+        cpu_server.assert_not_called()
+        worker.classify.assert_called_once()
+        self.assertIn("CPU inference: skipped by request", output.getvalue())
+
+    def test_model_check_skip_options_are_mutually_exclusive(self):
+        parsed = _parser().parse_args(["check-models", "--skip-cpu"])
+        self.assertTrue(parsed.skip_cpu)
+        self.assertFalse(parsed.skip_hailo)
+
+        with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            _parser().parse_args(["check-models", "--skip-cpu", "--skip-hailo"])
 
 
 class OutboxTests(unittest.TestCase):

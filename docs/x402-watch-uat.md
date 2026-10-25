@@ -153,7 +153,7 @@ service creation, repository creation, GitHub write, or timer enablement.
 The application CLI is available as:
 
 ```text
-PYTHONPATH=src python -m x402_watch.cli check-models [--skip-hailo]
+PYTHONPATH=src python -m x402_watch.cli check-models [--skip-hailo | --skip-cpu]
 PYTHONPATH=src python -m x402_watch.cli run [--date YYYY-MM-DD] [--cpu-only] [--publish]
 PYTHONPATH=src python -m x402_watch.cli retry-publish --confirm-publish
 ```
@@ -164,6 +164,10 @@ only considers previously validated outbox entries that were explicitly
 staged for publication; ordinary dry-run briefs are not eligible.
 The optional `--date` must match the current local date; historical and
 future-dated runs are rejected.
+
+`check-models` checks both local inference paths by default. Use
+`--skip-hailo` for CPU-only validation or `--skip-cpu` for Hailo-only
+validation; Hailo-only mode does not require or start the llama.cpp server.
 
 ## Acceptance gates
 
