@@ -124,6 +124,7 @@ class DailyPipeline:
         writer: DraftWriter,
         *,
         tagger: Tagger | None = None,
+        tagger_error: HailoWorkerError | None = None,
         publisher: Publisher | None = None,
         fetch_workers: int = 3,
     ):
@@ -135,6 +136,7 @@ class DailyPipeline:
         self._fetcher = fetcher
         self._writer = writer
         self._tagger = tagger
+        self._tagger_error = tagger_error
         self._publisher = publisher
         self._fetch_workers = fetch_workers
 
@@ -236,7 +238,12 @@ class DailyPipeline:
             deduplicated.append((lane, hit))
 
         sources: list[EvidenceSource] = []
-        tagger_failed = False
+        tagger_diagnostic = (
+            self._tagger_error.diagnostic if self._tagger_error is not None else None
+        )
+        tagger_failed = tagger_diagnostic is not None
+        if tagger_diagnostic is not None:
+            errors.append(f"hailo:{tagger_diagnostic}")
         fetch_futures: dict[Future, tuple[Lane, SearchHit]] = {}
         with ThreadPoolExecutor(max_workers=self._fetch_workers) as executor:
             for lane, hit in deduplicated:
@@ -252,7 +259,8 @@ class DailyPipeline:
                         hailo_relevance = self._tagger.classify(hit).relevance
                     except HailoWorkerError as exc:
                         tagger_failed = True
-                        errors.append(f"hailo:{type(exc).__name__}")
+                        tagger_diagnostic = exc.diagnostic
+                        errors.append(f"hailo:{tagger_diagnostic}")
                 try:
                     source = future.result()
                 except (SourceFetchError, SourceExtractionError) as exc:
@@ -297,10 +305,11 @@ class DailyPipeline:
             for source in evidence_sources
             if not source_requires_human_routing(source)
         ]
-        if self._tagger is None:
+        if tagger_failed:
+            diagnostic = f" ({tagger_diagnostic})" if tagger_diagnostic else ""
+            lane_status["hailo-triage"] = f"unavailable; CPU path continued{diagnostic}"
+        elif self._tagger is None:
             lane_status["hailo-triage"] = "not configured; CPU path only"
-        elif tagger_failed:
-            lane_status["hailo-triage"] = "unavailable; CPU path continued"
         else:
             lane_status["hailo-triage"] = "completed; advisory tags only"
         for lane in source_failures:

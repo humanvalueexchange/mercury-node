@@ -87,10 +87,12 @@ def _run_daily(args: argparse.Namespace, settings: Settings) -> int:
         writer = stack.enter_context(LlamaDraftWriter(settings))
 
         tagger = None
+        tagger_error: HailoWorkerError | None = None
         if not args.cpu_only:
             try:
                 tagger = stack.enter_context(HailoWorker(settings))
             except HailoWorkerError as exc:
+                tagger_error = exc
                 print(
                     f"Hailo triage unavailable; continuing with CPU-only synthesis "
                     f"({exc})",
@@ -108,6 +110,7 @@ def _run_daily(args: argparse.Namespace, settings: Settings) -> int:
             fetcher,
             writer,
             tagger=tagger,
+            tagger_error=tagger_error,
             publisher=publisher,
         )
         report = pipeline.run(

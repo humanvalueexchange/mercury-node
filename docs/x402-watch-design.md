@@ -176,9 +176,12 @@ daily orchestrator --------------------------- local SQLite state
   bounded title/snippet over stdin, and is started with a minimal environment
   that omits systemd credential paths. Its `HOME` is an app-scoped writable
   directory under the data directory so HailoRT can initialize its local state.
-  Its tags are advisory; it cannot discard evidence. It currently shares the
-  service UID, so omitting the credential path from its environment is not a
-  hard filesystem or credential boundary.
+  Its tags are advisory; it cannot discard evidence. Worker failures return a
+  bounded stage, exception type, and sanitized detail through the protocol so
+  the run can explain an unavailable triage path without recording evidence
+  text or credentials. It currently shares the service UID, so omitting the
+  credential path from its environment is not a hard filesystem or credential
+  boundary.
   A separate OS identity/network sandbox remains a deployment hardening item
   and is not yet verified.
 - **CPU model worker:** `llama-server` is short-lived, binds only to loopback,
@@ -324,7 +327,7 @@ The content scope follows the
 |---|---|
 | Brave unavailable or a lane has no successful query | Mark coverage incomplete; do not claim no material change. |
 | A source is inaccessible or has no publication date | Record fetch status or “not stated”; do not invent a date. |
-| Hailo unavailable or incompatible | Continue CPU-only if the run remains valid; record the missing triage step. Do not install or replace Hailo software automatically. |
+| Hailo unavailable or incompatible | Continue CPU-only if the run remains valid; record the sanitized worker stage, exception type, and detail. Do not install or replace Hailo software automatically. |
 | CPU model unavailable, over memory budget, or emits invalid citations | Do not publish generated claims. Record a failure or a clearly labeled incomplete status. |
 | Financial/legal/tax analysis is implicated | Hold that item's interpretation for hve-cfo/Brian. |
 | GitHub write fails | Keep the validated brief in the local outbox and retry idempotently; never report a successful publish without a confirmed API result. |
