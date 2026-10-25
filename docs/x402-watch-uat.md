@@ -72,6 +72,10 @@ service creation, repository creation, GitHub write, or timer enablement.
   citation IDs to supplied claimable evidence and includes sanitized run
   diagnostics in rejection errors. It does not relax fetch limits or bypass
   HTTP 403 responses.
+- The Hailo diagnostics change propagates worker startup and inference failures
+  as bounded, sanitized stage/type/detail fields in run warnings and the brief's
+  triage status. Offline tests cover error propagation and CPU fallback; the
+  actual Hailo runtime cause remains unverified on Mercury.
 - No recurring job or GitHub publication is enabled. Publication remains
   blocked until the private target repository and scoped credentials are
   provisioned and separately approved.

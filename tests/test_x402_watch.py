@@ -24,7 +24,7 @@ from x402_watch.cli import _check_models, _print_warnings
 from x402_watch.config import ConfigurationError, Settings
 from x402_watch.db import Store
 from x402_watch.hailo import HailoWorker, HailoWorkerError
-from x402_watch.hailo_worker import _parse_tag
+from x402_watch.hailo_worker import _diagnostic_error, _parse_tag
 from x402_watch.llm import LlamaDraftWriter, LocalModelError
 from x402_watch.models import (
     LANE_QUERIES,
@@ -358,6 +358,37 @@ class HailoWorkerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _parse_tag("unrecognized<|im_end|>")
 
+    def test_worker_diagnostic_redacts_model_and_evidence_text(self):
+        model_path = "/opt/x402-watch/model.hef"
+        evidence = ("private title", "private source snippet")
+        diagnostic = _diagnostic_error(
+            "model_load",
+            RuntimeError(
+                f"Could not load {model_path} for {evidence[0]}: {evidence[1]}"
+            ),
+            model_path=model_path,
+            evidence=evidence,
+        )
+        self.assertEqual(diagnostic["stage"], "model_load")
+        self.assertEqual(diagnostic["exception"], "RuntimeError")
+        self.assertNotIn(model_path, diagnostic["message"])
+        self.assertNotIn(evidence[0], diagnostic["message"])
+        self.assertNotIn(evidence[1], diagnostic["message"])
+
+    def test_worker_diagnostic_omits_inference_exception_text(self):
+        diagnostic = _diagnostic_error(
+            "inference",
+            RuntimeError("failure while processing private source text"),
+            evidence=("private source text",),
+        )
+        self.assertEqual(diagnostic["message"], "")
+        hailo_error = _diagnostic_error(
+            "inference",
+            RuntimeError("HAILO_OUT_OF_PHYSICAL_DEVICES for private source text"),
+            evidence=("private source text",),
+        )
+        self.assertEqual(hailo_error["message"], "HAILO_OUT_OF_PHYSICAL_DEVICES")
+
     def test_worker_spawn_error_is_reported_as_optional_hailo_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             python = Path(directory) / "python"
@@ -380,6 +411,100 @@ class HailoWorkerTests(unittest.TestCase):
                     spawn.call_args.kwargs["env"]["HOME"],
                     str(hailo_home),
                 )
+
+    def test_worker_startup_response_preserves_sanitized_cause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            python = Path(directory) / "python"
+            model = Path(directory) / "model.hef"
+            python.write_text("placeholder", encoding="utf-8")
+            model.write_bytes(b"placeholder")
+            process = SimpleNamespace(
+                stdin=io.StringIO(),
+                stdout=io.StringIO(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": {
+                                "stage": "runtime_import",
+                                "exception": "ModuleNotFoundError",
+                                "message": "No module named 'hailo_platform'",
+                            },
+                        }
+                    )
+                    + "\n"
+                ),
+                poll=Mock(return_value=1),
+                returncode=1,
+            )
+            selector = MagicMock()
+            selector.select.return_value = [(None, None)]
+            worker = HailoWorker(
+                Settings(
+                    data_dir=Path(directory) / "state",
+                    hailo_python=python,
+                    hailo_model=model,
+                )
+            )
+            with (
+                patch("x402_watch.hailo.subprocess.Popen", return_value=process),
+                patch(
+                    "x402_watch.hailo.selectors.DefaultSelector",
+                    return_value=selector,
+                ),
+                self.assertRaises(HailoWorkerError) as raised,
+            ):
+                worker.start()
+
+        self.assertEqual(
+            raised.exception.diagnostic,
+            "runtime_import:ModuleNotFoundError: No module named 'hailo_platform'",
+        )
+
+    def test_inference_diagnostic_redacts_evidence_paths_urls_and_secrets(self):
+        hit = SearchHit(
+            title="Private evidence title",
+            url="https://example.com/article",
+            snippet="Private evidence snippet",
+        )
+        response = {
+            "ok": False,
+            "error": {
+                "stage": "inference",
+                "exception": "HailoRTException",
+                "message": (
+                    f"Failed for {hit.title} {hit.snippet} at /tmp/model.hef; "
+                    "token=fixture-secret; "
+                    "{\"api_key\":\"fixture-json-secret\"}; "
+                    "https://example.com/article?key=fixture-secret"
+                ),
+            },
+        }
+        process = SimpleNamespace(
+            stdin=io.StringIO(),
+            stdout=io.StringIO(json.dumps(response) + "\n"),
+            poll=Mock(return_value=1),
+            returncode=1,
+        )
+        selector = MagicMock()
+        selector.select.return_value = [(None, None)]
+        worker = HailoWorker(Settings())
+        worker._process = process
+        worker._selector = selector
+
+        with self.assertRaises(HailoWorkerError) as raised:
+            worker.classify(hit)
+        worker.stop()
+
+        self.assertTrue(raised.exception.diagnostic.startswith("inference:"))
+        for sensitive_value in (
+            hit.title,
+            hit.snippet,
+            "/tmp/model.hef",
+            "fixture-secret",
+            "fixture-json-secret",
+            "https://example.com",
+        ):
+            self.assertNotIn(sensitive_value, raised.exception.diagnostic)
 
 
 class LocalPromptTests(unittest.TestCase):
@@ -1087,6 +1212,68 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("no material change", second_text.lower())
             self.assertIn("unchanged", second_text)
             store.close()
+
+    def test_hailo_startup_failure_is_reported_while_cpu_path_continues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(data_dir=Path(directory))
+            store = Store(settings.database_path)
+            diagnostic = "runtime_import:ModuleNotFoundError: hailo_platform"
+            pipeline = DailyPipeline(
+                settings,
+                store,
+                _FakeSearch(),
+                _FakeFetcher(),
+                _FixtureWriter(),
+                tagger_error=HailoWorkerError(
+                    "Hailo worker failed",
+                    diagnostic=diagnostic,
+                ),
+            )
+            try:
+                report = pipeline.run(date.today())
+                brief = report.brief_path.read_text(encoding="utf-8")
+                self.assertTrue(report.coverage_complete)
+                self.assertEqual(report.source_count, len(LANE_QUERIES))
+                self.assertIn(f"hailo:{diagnostic}", report.warnings)
+                self.assertIn(
+                    f"unavailable; CPU path continued ({diagnostic})",
+                    brief,
+                )
+            finally:
+                store.close()
+
+    def test_hailo_inference_failure_is_reported_while_cpu_path_continues(self):
+        class FailingTagger(_FakeTagger):
+            def classify(self, hit: SearchHit) -> HailoTag:
+                raise HailoWorkerError(
+                    "Hailo inference failed",
+                    diagnostic="inference:HailoRTException: error_code_42",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(data_dir=Path(directory))
+            store = Store(settings.database_path)
+            pipeline = DailyPipeline(
+                settings,
+                store,
+                _FakeSearch(),
+                _FakeFetcher(),
+                _FixtureWriter(),
+                tagger=FailingTagger(),
+            )
+            try:
+                report = pipeline.run(date.today())
+                brief = report.brief_path.read_text(encoding="utf-8")
+                diagnostic = "inference:HailoRTException: error_code_42"
+                self.assertTrue(report.coverage_complete)
+                self.assertEqual(report.source_count, len(LANE_QUERIES))
+                self.assertIn(f"hailo:{diagnostic}", report.warnings)
+                self.assertIn(
+                    f"unavailable; CPU path continued ({diagnostic})",
+                    brief,
+                )
+            finally:
+                store.close()
 
     def test_policy_rejection_reports_the_safe_policy_reason(self):
         with tempfile.TemporaryDirectory() as directory:
