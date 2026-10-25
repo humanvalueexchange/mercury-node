@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
+import os
 import socket
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from time import monotonic
 from typing import Self
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
-import httpx
 import trafilatura
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 from trafilatura.metadata import extract_metadata
 
 from .models import EvidenceSource, Lane, SearchHit
@@ -31,6 +32,8 @@ class SourceFetchFailureCategory(str, Enum):
     COMPRESSED_RESPONSE = "compressed_response"
     INVALID_CONTENT_LENGTH = "invalid_content_length"
     RESPONSE_TOO_LARGE = "response_too_large"
+    REQUEST_LIMIT = "request_limit"
+    UNSAFE_REQUEST = "unsafe_request"
     REQUEST_FAILED = "request_failed"
     REDIRECT_HANDLING_FAILED = "redirect_handling_failed"
 
@@ -113,14 +116,16 @@ def _is_primary_source(lane: Lane, url: str) -> bool:
     )
 
 
-class PublicPageFetcher:
+class PlaywrightPageFetcher:
+    _BLOCKED_RESOURCE_TYPES = frozenset({"font", "image", "media", "websocket"})
+    _MAX_BROWSER_REQUESTS = 128
+
     def __init__(
         self,
         *,
         max_bytes: int = 2_000_000,
         max_redirects: int = 4,
         timeout: float = 20.0,
-        client: httpx.Client | None = None,
         resolver=socket.getaddrinfo,
     ):
         if max_bytes < 1024 or max_redirects < 0 or timeout <= 0:
@@ -129,160 +134,211 @@ class PublicPageFetcher:
         self._max_redirects = max_redirects
         self._max_duration = timeout
         self._resolver = resolver
-        self._owns_client = client is None
-        self._client = client or httpx.Client(
-            timeout=timeout,
-            trust_env=False,
-            follow_redirects=False,
-            headers={
-                "User-Agent": "x402-watch/0.1 (+local research client)",
-                "Accept-Encoding": "identity",
-            },
-        )
 
     def fetch(self, url: str) -> FetchedPage:
-        current = url
+        try:
+            safe_url, _ = resolve_public_url(url, resolver=self._resolver)
+        except UnsafeUrlError as exc:
+            raise SourceFetchError(
+                str(exc),
+                category=SourceFetchFailureCategory.UNSAFE_URL,
+            ) from exc
+
         deadline = monotonic() + self._max_duration
-        for redirect_count in range(self._max_redirects + 1):
-            if monotonic() >= deadline:
-                raise SourceFetchError(
-                    "Source request exceeded the time limit",
-                    category=SourceFetchFailureCategory.REQUEST_TIMEOUT,
+        route_failures: list[SourceFetchError] = []
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    env=_browser_environment(),
+                    timeout=max(1, int(self._max_duration * 1000)),
                 )
-            try:
-                safe_url, address = resolve_public_url(
-                    current,
-                    resolver=self._resolver,
-                )
-            except UnsafeUrlError as exc:
-                raise SourceFetchError(
-                    str(exc),
-                    category=SourceFetchFailureCategory.UNSAFE_URL,
-                ) from exc
-            parsed = urlsplit(safe_url)
-            ip = ipaddress.ip_address(address)
-            pinned_host = f"[{ip.compressed}]" if ip.version == 6 else ip.compressed
-            pinned_url = urlunsplit(
-                (
-                    parsed.scheme,
-                    pinned_host,
-                    parsed.path,
-                    parsed.query,
-                    "",
-                )
-            )
-            request = self._client.build_request(
-                "GET",
-                pinned_url,
-                headers={
-                    "Host": parsed.netloc,
-                    "Accept-Encoding": "identity",
-                    "User-Agent": "x402-watch/0.1 (+local research client)",
-                },
-            )
-            if _is_dns_name(parsed.hostname):
-                request.extensions["sni_hostname"] = parsed.hostname.encode("idna")
-            try:
-                with closing(
-                    self._client.send(
-                        request,
-                        stream=True,
-                        follow_redirects=False,
+                try:
+                    context = browser.new_context(
+                        accept_downloads=False,
+                        service_workers="block",
                     )
-                ) as response:
-                    if response.status_code in {301, 302, 303, 307, 308}:
-                        location = response.headers.get("location")
-                        if not location:
+                    try:
+                        request_count = 0
+
+                        def validate_request(route) -> None:
+                            nonlocal request_count
+                            request = route.request
+                            if request.resource_type in self._BLOCKED_RESOURCE_TYPES:
+                                route.abort()
+                                return
+                            scheme = request.url.partition(":")[0].lower()
+                            if scheme in {"about", "blob", "data"}:
+                                route.continue_()
+                                return
+                            request_count += 1
+                            if request_count > self._MAX_BROWSER_REQUESTS:
+                                route_failures.append(
+                                    SourceFetchError(
+                                        "Source exceeded the browser request limit",
+                                        category=(
+                                            SourceFetchFailureCategory.REQUEST_LIMIT
+                                        ),
+                                    )
+                                )
+                                route.abort()
+                                return
+                            if request.method != "GET":
+                                route_failures.append(
+                                    SourceFetchError(
+                                        "Source attempted a non-GET browser request",
+                                        category=(
+                                            SourceFetchFailureCategory.UNSAFE_REQUEST
+                                        ),
+                                    )
+                                )
+                                route.abort()
+                                return
+                            if (
+                                _redirect_count(request, self._max_redirects)
+                                > self._max_redirects
+                            ):
+                                route_failures.append(
+                                    SourceFetchError(
+                                        "Source exceeded the redirect limit",
+                                        category=(
+                                            SourceFetchFailureCategory.REDIRECT_LIMIT
+                                        ),
+                                    )
+                                )
+                                route.abort()
+                                return
+                            try:
+                                request_url, _ = resolve_public_url(
+                                    request.url,
+                                    resolver=self._resolver,
+                                )
+                            except UnsafeUrlError as exc:
+                                route_failures.append(
+                                    SourceFetchError(
+                                        str(exc),
+                                        category=(
+                                            SourceFetchFailureCategory.UNSAFE_URL
+                                        ),
+                                    )
+                                )
+                                route.abort()
+                                return
+                            if request_url == request.url:
+                                route.continue_()
+                            else:
+                                route.continue_(url=request_url)
+
+                        context.route("**/*", validate_request)
+                        page = context.new_page()
+                        remaining_ms = int((deadline - monotonic()) * 1000)
+                        if remaining_ms <= 0:
                             raise SourceFetchError(
-                                "Source redirect omitted its target",
+                                "Source request exceeded the time limit",
                                 category=(
-                                    SourceFetchFailureCategory.REDIRECT_MISSING_TARGET
+                                    SourceFetchFailureCategory.REQUEST_TIMEOUT
                                 ),
                             )
-                        if redirect_count == self._max_redirects:
-                            raise SourceFetchError(
-                                "Source exceeded the redirect limit",
-                                category=SourceFetchFailureCategory.REDIRECT_LIMIT,
+                        try:
+                            response = page.goto(
+                                safe_url,
+                                wait_until="domcontentloaded",
+                                timeout=remaining_ms,
                             )
-                        current = urljoin(safe_url, location)
-                        continue
-                    if response.status_code < 200 or response.status_code >= 300:
-                        raise SourceFetchError(
-                            f"Source returned HTTP {response.status_code}",
-                            category=SourceFetchFailureCategory.HTTP_STATUS,
-                            status_code=response.status_code,
-                        )
-                    content_type = response.headers.get("content-type", "").lower()
-                    if not content_type.startswith(
-                        ("text/html", "application/xhtml+xml")
-                    ):
-                        raise SourceFetchError(
-                            "Source is not an HTML page",
-                            category=SourceFetchFailureCategory.NON_HTML_CONTENT,
-                        )
-                    content_encoding = response.headers.get(
-                        "content-encoding",
-                        "identity",
-                    ).strip().lower()
-                    if content_encoding not in {"", "identity"}:
-                        raise SourceFetchError(
-                            "Compressed source responses are not supported",
-                            category=SourceFetchFailureCategory.COMPRESSED_RESPONSE,
-                        )
-                    content_length = response.headers.get("content-length")
-                    if content_length:
-                        if not content_length.isdigit():
+                        except PlaywrightError:
+                            if route_failures:
+                                raise route_failures[0]
+                            raise
+                        if route_failures:
+                            raise route_failures[0]
+                        if response is None:
                             raise SourceFetchError(
-                                "Source returned an invalid content length",
-                                category=(
-                                    SourceFetchFailureCategory.INVALID_CONTENT_LENGTH
-                                ),
+                                "Source navigation returned no response",
+                                category=SourceFetchFailureCategory.REQUEST_FAILED,
                             )
-                        declared_length = content_length.lstrip("0") or "0"
-                        if (
-                            len(declared_length) > len(str(self._max_bytes))
-                            or int(declared_length) > self._max_bytes
+                        if response.status < 200 or response.status >= 300:
+                            raise SourceFetchError(
+                                f"Source returned HTTP {response.status}",
+                                category=SourceFetchFailureCategory.HTTP_STATUS,
+                                status_code=response.status,
+                            )
+                        content_type = (
+                            response.header_value("content-type") or ""
+                        ).lower()
+                        if not content_type.startswith(
+                            ("text/html", "application/xhtml+xml")
                         ):
                             raise SourceFetchError(
-                                "Source exceeded the byte limit",
-                                category=SourceFetchFailureCategory.RESPONSE_TOO_LARGE,
+                                "Source is not an HTML page",
+                                category=SourceFetchFailureCategory.NON_HTML_CONTENT,
                             )
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
+                        content_length = response.header_value("content-length")
+                        if content_length:
+                            if not content_length.isdigit():
+                                raise SourceFetchError(
+                                    "Source returned an invalid content length",
+                                    category=(
+                                        SourceFetchFailureCategory.INVALID_CONTENT_LENGTH
+                                    ),
+                                )
+                            declared_length = content_length.lstrip("0") or "0"
+                            if (
+                                len(declared_length) > len(str(self._max_bytes))
+                                or int(declared_length) > self._max_bytes
+                            ):
+                                raise SourceFetchError(
+                                    "Source exceeded the byte limit",
+                                    category=(
+                                        SourceFetchFailureCategory.RESPONSE_TOO_LARGE
+                                    ),
+                                )
+                        try:
+                            final_url, _ = resolve_public_url(
+                                page.url,
+                                resolver=self._resolver,
+                            )
+                        except UnsafeUrlError as exc:
+                            raise SourceFetchError(
+                                str(exc),
+                                category=SourceFetchFailureCategory.UNSAFE_URL,
+                            ) from exc
+                        html = page.content().encode("utf-8")
                         if monotonic() >= deadline:
                             raise SourceFetchError(
                                 "Source request exceeded the time limit",
                                 category=SourceFetchFailureCategory.REQUEST_TIMEOUT,
                             )
-                        body.extend(chunk)
-                        if len(body) > self._max_bytes:
+                        if len(html) > self._max_bytes:
                             raise SourceFetchError(
                                 "Source exceeded the byte limit",
                                 category=SourceFetchFailureCategory.RESPONSE_TOO_LARGE,
                             )
-                    return FetchedPage(
-                        url=safe_url,
-                        html=bytes(body),
-                        content_type=content_type,
-                    )
-            except httpx.TimeoutException as exc:
-                raise SourceFetchError(
-                    "Source request timed out",
-                    category=SourceFetchFailureCategory.REQUEST_TIMEOUT,
-                ) from exc
-            except httpx.HTTPError as exc:
-                raise SourceFetchError(
-                    "Public source request failed",
-                    category=SourceFetchFailureCategory.REQUEST_FAILED,
-                ) from exc
-        raise SourceFetchError(
-            "Source redirect handling failed",
-            category=SourceFetchFailureCategory.REDIRECT_HANDLING_FAILED,
-        )
+                        return FetchedPage(
+                            url=final_url,
+                            html=html,
+                            content_type=content_type,
+                        )
+                    finally:
+                        context.close()
+                finally:
+                    browser.close()
+        except PlaywrightTimeoutError as exc:
+            if route_failures:
+                raise route_failures[0] from exc
+            raise SourceFetchError(
+                "Source request timed out",
+                category=SourceFetchFailureCategory.REQUEST_TIMEOUT,
+            ) from exc
+        except PlaywrightError as exc:
+            if route_failures:
+                raise route_failures[0] from exc
+            raise SourceFetchError(
+                "Public source browser request failed",
+                category=SourceFetchFailureCategory.REQUEST_FAILED,
+            ) from exc
 
     def close(self) -> None:
-        if self._owns_client:
-            self._client.close()
+        return None
 
     def __enter__(self) -> Self:
         return self
@@ -346,7 +402,7 @@ def extract_source(
 
 __all__ = [
     "FetchedPage",
-    "PublicPageFetcher",
+    "PlaywrightPageFetcher",
     "SourceExtractionError",
     "SourceFetchError",
     "SourceFetchFailureCategory",
@@ -354,11 +410,23 @@ __all__ = [
 ]
 
 
-def _is_dns_name(host: str | None) -> bool:
-    if host is None:
-        return False
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        return True
-    return False
+def _redirect_count(request, max_redirects: int) -> int:
+    count = 0
+    redirected_from = request.redirected_from
+    while redirected_from is not None:
+        count += 1
+        if count > max_redirects:
+            return count
+        redirected_from = redirected_from.redirected_from
+    return count
+
+
+def _browser_environment() -> dict[str, str]:
+    allowed = {"HOME", "PATH", "LANG", "LC_ALL", "TMPDIR"}
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in allowed
+    }
+    environment.setdefault("HOME", os.path.expanduser("~"))
+    return environment
