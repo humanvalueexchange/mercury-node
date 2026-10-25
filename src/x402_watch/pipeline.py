@@ -257,7 +257,12 @@ class DailyPipeline:
                     source = future.result()
                 except (SourceFetchError, SourceExtractionError) as exc:
                     source_failures.add(lane)
-                    errors.append(f"source:{lane.value}:{type(exc).__name__}")
+                    failure_code = (
+                        exc.diagnostic_code
+                        if isinstance(exc, SourceFetchError)
+                        else "source_extraction_failed"
+                    )
+                    errors.append(f"source:{lane.value}:{failure_code}")
                     continue
                 if hailo_relevance is not None:
                     source = source.model_copy(

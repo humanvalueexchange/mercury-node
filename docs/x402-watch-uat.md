@@ -49,11 +49,19 @@ service creation, repository creation, GitHub write, or timer enablement.
   `HansHWestphal/x402-watch` repository and its scoped GitHub App are not
   provisioned.
 - The first approved live dry run exceeded the original 240-second model
-  timeout. After PR #9 was merged, the updated UAT run completed local
-  synthesis in about 21 minutes but failed editorial validation; no brief was
-  written or published. PR #10 exposed the reason: a claim cited evidence
-  routed for human review. A follow-up filters routed evidence out of claim
-  synthesis while retaining it in the automatic human-review section.
+  timeout. After PR #9 was merged, a run completed synthesis in about 21
+  minutes but failed editorial validation because a claim cited evidence held
+  for human review; PR #10 exposed the fixed policy reason, and PR #11 now
+  excludes routed sources from claim synthesis while retaining them for review.
+- The approved 2026-10-25 UAT run after PR #11 completed local Qwen3 synthesis
+  in about 11 minutes, but coverage was incomplete: all lane searches
+  succeeded, while four source fetches failed across stablecoin/card-volume
+  and Stripe/OpenRouter. Hailo triage also failed; CPU synthesis continued.
+  A private baseline draft was written locally but not published. The run
+  record contained only lane and exception type, so the fetch cause could not
+  be determined. This follow-up records fixed fetch-failure categories and
+  HTTP status codes without embedding URLs, response text, or credentials in
+  diagnostics.
 - No recurring job or GitHub publication is enabled. Publication remains
   blocked until the private target repository and scoped credentials are
   provisioned and separately approved.
@@ -149,6 +157,9 @@ future-dated runs are rejected.
 - Hailo inference loads the HEF under HailoRT 5.1.1 and returns a valid tag
   without affecting whether a candidate is retained.
 - A failed Brave query or page fetch prevents a no-material-change claim.
+- Local run diagnostics expose fixed source-fetch failure categories (and HTTP
+  status codes when available) without embedding URLs or response text in
+  diagnostic entries.
 - A first complete run is marked as a baseline; no-change is allowed only on a
   later complete run.
 - Factual claims with unknown citations, unapproved future-year proposals,

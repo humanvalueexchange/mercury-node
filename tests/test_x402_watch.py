@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import socket
 import tempfile
@@ -18,7 +19,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from x402_watch.brave import BraveSearchClient
-from x402_watch.cli import _check_models
+from x402_watch.cli import _check_models, _print_warnings
 from x402_watch.config import ConfigurationError, Settings
 from x402_watch.db import Store
 from x402_watch.hailo import HailoWorker, HailoWorkerError
@@ -42,7 +43,12 @@ from x402_watch.policy import (
 )
 from x402_watch.publisher import GitHubAppPublisher, GitHubPublishError
 from x402_watch.render import render_brief
-from x402_watch.sources import FetchedPage, PublicPageFetcher, SourceFetchError
+from x402_watch.sources import (
+    FetchedPage,
+    PublicPageFetcher,
+    SourceFetchError,
+    SourceFetchFailureCategory,
+)
 from x402_watch.urls import UnsafeUrlError, canonicalize_url, validate_public_url
 
 
@@ -131,7 +137,44 @@ class ConfigurationTests(unittest.TestCase):
             BraveSearchClient("test-key", endpoint="https://example.com/search")
 
 
+class CliDiagnosticsTests(unittest.TestCase):
+    def test_cli_prints_sanitized_warning_codes(self):
+        output = io.StringIO()
+        with patch("sys.stderr", output):
+            _print_warnings(("source:stablecoin-vs-card-volume:http_status_429",))
+        self.assertEqual(
+            output.getvalue(),
+            "Warnings:\n  source:stablecoin-vs-card-volume:http_status_429\n",
+        )
+
+
 class SourceFetcherTests(unittest.TestCase):
+    def test_http_status_error_has_a_sanitized_diagnostic_code(self):
+        def handler(request):
+            return httpx.Response(429, text="Private response detail")
+
+        def public_resolver(host, port, type):
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("93.184.216.34", port),
+                )
+            ]
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        fetcher = PublicPageFetcher(client=client, resolver=public_resolver)
+        try:
+            with self.assertRaises(SourceFetchError) as context:
+                fetcher.fetch("https://example.com/article?token=fixture-secret")
+            self.assertEqual(context.exception.diagnostic_code, "http_status_429")
+            self.assertNotIn("fixture-secret", context.exception.diagnostic_code)
+            self.assertNotIn("Private response detail", context.exception.diagnostic_code)
+        finally:
+            client.close()
+
     def test_redirect_to_private_address_is_rejected_before_second_request(self):
         requests = []
         resolved_hosts = []
@@ -791,6 +834,20 @@ class _FakeFetcher:
         return FetchedPage(url=url, html=html, content_type="text/html")
 
 
+class _OneFailureFetcher(_FakeFetcher):
+    def __init__(self, failed_url: str):
+        self._failed_url = failed_url
+
+    def fetch(self, url: str) -> FetchedPage:
+        if url == self._failed_url:
+            raise SourceFetchError(
+                "Source returned HTTP 403 for https://example.com/?token=fixture-secret",
+                category=SourceFetchFailureCategory.HTTP_STATUS,
+                status_code=403,
+            )
+        return super().fetch(url)
+
+
 class _FakeTagger:
     def classify(self, hit: SearchHit) -> HailoTag:
         return HailoTag(relevance="not_relevant")
@@ -954,6 +1011,35 @@ class PipelineTests(unittest.TestCase):
                 brief = report.brief_path.read_text(encoding="utf-8")
                 self.assertIn("Financial, legal, or tax items held for review", brief)
                 self.assertIn("Held for hve-cfo/Brian review", brief)
+            finally:
+                store.close()
+
+    def test_source_failure_reports_only_sanitized_category(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(data_dir=Path(directory))
+            store = Store(settings.database_path)
+            genius_query = LANE_QUERIES[Lane.GENIUS_ACT][0]
+            failed_url = (
+                "https://example.com/"
+                f"{hashlib.sha256(genius_query.encode()).hexdigest()[:12]}"
+            )
+            pipeline = DailyPipeline(
+                settings,
+                store,
+                _FakeSearch(),
+                _OneFailureFetcher(failed_url),
+                _FixtureWriter(),
+            )
+            try:
+                report = pipeline.run(date.today())
+                self.assertFalse(report.coverage_complete)
+                self.assertIn(
+                    "source:genius-act-implementation:http_status_403",
+                    report.warnings,
+                )
+                warning_text = " ".join(report.warnings)
+                self.assertNotIn("example.com", warning_text)
+                self.assertNotIn("fixture-secret", warning_text)
             finally:
                 store.close()
 

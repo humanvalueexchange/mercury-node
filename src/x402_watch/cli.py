@@ -124,9 +124,16 @@ def _run_daily(args: argparse.Namespace, settings: Settings) -> int:
     print(f"Private outbox: {report.brief_path}")
     if report.published_commit:
         print(f"GitHub commit: {report.published_commit}")
-    if report.warnings:
-        print(f"Warnings: {len(report.warnings)}; see the local run record.", file=sys.stderr)
+    _print_warnings(report.warnings)
     return 0 if report.coverage_complete else 2
+
+
+def _print_warnings(warnings: tuple[str, ...]) -> None:
+    if not warnings:
+        return
+    print("Warnings:", file=sys.stderr)
+    for warning in warnings:
+        print(f"  {warning}", file=sys.stderr)
 
 
 def _check_models(args: argparse.Namespace, settings: Settings) -> int:
