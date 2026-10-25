@@ -362,6 +362,52 @@ class LocalPromptTests(unittest.TestCase):
         self.assertEqual(len(evidence["excerpt"]), 400)
         self.assertLessEqual(len(captured["messages"][1]["content"]), 20_000)
         self.assertIn("no summary field", captured["messages"][0]["content"])
+        self.assertIn("allowed_source_ids", captured["messages"][0]["content"])
+        self.assertEqual(payload["allowed_source_ids"], [source.source_id])
+        response_format = captured["response_format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        schema = response_format["json_schema"]["schema"]
+        for definition_name in ("DraftClaim", "HeldItem"):
+            self.assertEqual(
+                schema["$defs"][definition_name]["properties"]["source_ids"][
+                    "items"
+                ]["enum"],
+                [source.source_id],
+            )
+
+    def test_writer_constrains_empty_evidence_to_empty_item_lists(self):
+        captured = {}
+
+        def handler(request):
+            captured.update(json.loads(request.read()))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"claims":[],"held_items":[],'
+                                    '"no_material_change":false}'
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        writer = LlamaDraftWriter(Settings(), client=client)
+        try:
+            writer._write(date.today(), [], False, False)
+        finally:
+            writer.close()
+            client.close()
+        payload = json.loads(captured["messages"][1]["content"])
+        schema = captured["response_format"]["json_schema"]["schema"]
+        self.assertEqual(payload["allowed_source_ids"], [])
+        self.assertEqual(schema["properties"]["claims"]["maxItems"], 0)
+        self.assertEqual(schema["properties"]["held_items"]["maxItems"], 0)
 
     def test_writer_rejects_evidence_over_the_prompt_budget(self):
         def handler(request):
@@ -972,19 +1018,32 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             settings = Settings(data_dir=Path(directory))
             store = Store(settings.database_path)
+            genius_query = LANE_QUERIES[Lane.GENIUS_ACT][0]
+            failed_url = (
+                "https://example.com/"
+                f"{hashlib.sha256(genius_query.encode()).hexdigest()[:12]}"
+            )
             pipeline = DailyPipeline(
                 settings,
                 store,
                 _FakeSearch(),
-                _FakeFetcher(),
+                _OneFailureFetcher(failed_url),
                 _InvalidDraftWriter(),
             )
             try:
-                with self.assertRaisesRegex(
-                    PipelineError,
-                    "PolicyError: A claim cites an unknown source ID",
-                ):
+                with self.assertRaises(PipelineError) as raised:
                     pipeline.run(date.today())
+                error_text = str(raised.exception)
+                self.assertIn(
+                    "PolicyError: A claim cites an unknown source ID",
+                    error_text,
+                )
+                self.assertIn(
+                    "source:genius-act-implementation:http_status_403",
+                    error_text,
+                )
+                self.assertNotIn("example.com", error_text)
+                self.assertNotIn("fixture-secret", error_text)
             finally:
                 store.close()
 
