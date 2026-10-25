@@ -48,11 +48,12 @@ service creation, repository creation, GitHub write, or timer enablement.
 - A protected local copy of the Brave key is provisioned; the private
   `HansHWestphal/x402-watch` repository and its scoped GitHub App are not
   provisioned.
-- The first approved live dry run reached local CPU synthesis but exceeded the
-  original 240-second request timeout. No brief was written or published. A
-  local follow-up preserves the 2,600-token output budget and raises the model
-  request timeout; it must be reviewed and deployed to the UAT copy before a
-  retry.
+- The first approved live dry run exceeded the original 240-second model
+  timeout. After PR #9 was merged, the updated UAT run completed local
+  synthesis in about 21 minutes but failed editorial validation; no brief was
+  written or published. The CLI currently reports only `PolicyError`, so a
+  local follow-up is being prepared to surface the specific policy reason
+  before another retry.
 - No recurring job or GitHub publication is enabled. Publication remains
   blocked until the private target repository and scoped credentials are
   provisioned and separately approved.
