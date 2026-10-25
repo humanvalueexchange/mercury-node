@@ -51,9 +51,9 @@ service creation, repository creation, GitHub write, or timer enablement.
 - The first approved live dry run exceeded the original 240-second model
   timeout. After PR #9 was merged, the updated UAT run completed local
   synthesis in about 21 minutes but failed editorial validation; no brief was
-  written or published. The CLI currently reports only `PolicyError`, so a
-  local follow-up is being prepared to surface the specific policy reason
-  before another retry.
+  written or published. PR #10 exposed the reason: a claim cited evidence
+  routed for human review. A follow-up filters routed evidence out of claim
+  synthesis while retaining it in the automatic human-review section.
 - No recurring job or GitHub publication is enabled. Publication remains
   blocked until the private target repository and scoped credentials are
   provisioned and separately approved.

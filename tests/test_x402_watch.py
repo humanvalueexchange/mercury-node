@@ -842,6 +842,31 @@ class _InvalidDraftWriter:
         )
 
 
+class _RecordingWriter:
+    def __init__(self):
+        self.received_sources: list[EvidenceSource] = []
+
+    def write(
+        self,
+        brief_date: date,
+        sources: list[EvidenceSource],
+        coverage_complete: bool,
+        baseline: bool,
+    ) -> DraftBrief:
+        self.received_sources = sources
+        source = next(source for source in sources if source.lane == Lane.X402_ACP)
+        return DraftBrief(
+            claims=[
+                DraftClaim(
+                    text="A safe source records a verified protocol update.",
+                    source_ids=[source.source_id],
+                    uncertainty="The fixture cannot assess its real-world impact.",
+                    why_it_matters="It verifies source filtering in the pipeline.",
+                )
+            ]
+        )
+
+
 class PipelineTests(unittest.TestCase):
     def test_daily_pipeline_rejects_backdated_runs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -903,6 +928,32 @@ class PipelineTests(unittest.TestCase):
                     "PolicyError: A claim cites an unknown source ID",
                 ):
                     pipeline.run(date.today())
+            finally:
+                store.close()
+
+    def test_human_routed_sources_are_held_but_not_sent_for_claim_synthesis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(data_dir=Path(directory))
+            store = Store(settings.database_path)
+            writer = _RecordingWriter()
+            pipeline = DailyPipeline(
+                settings,
+                store,
+                _FakeSearch(),
+                _FakeFetcher(),
+                writer,
+            )
+            try:
+                report = pipeline.run(date.today())
+                self.assertTrue(report.coverage_complete)
+                self.assertEqual(report.source_count, len(LANE_QUERIES))
+                self.assertNotIn(
+                    Lane.GENIUS_ACT,
+                    {source.lane for source in writer.received_sources},
+                )
+                brief = report.brief_path.read_text(encoding="utf-8")
+                self.assertIn("Financial, legal, or tax items held for review", brief)
+                self.assertIn("Held for hve-cfo/Brian review", brief)
             finally:
                 store.close()
 

@@ -46,6 +46,12 @@ def requires_human_routing(text: str) -> bool:
     return bool(_HELD_TERMS.search(text))
 
 
+def source_requires_human_routing(source: EvidenceSource) -> bool:
+    return source.lane == Lane.GENIUS_ACT or requires_human_routing(
+        f"{source.title}\n{source.excerpt}"
+    )
+
+
 def route_sensitive_sources(
     draft: DraftBrief,
     sources: list[EvidenceSource],
@@ -59,8 +65,7 @@ def route_sensitive_sources(
     required_ids = {
         source.source_id
         for source in sources
-        if source.lane == Lane.GENIUS_ACT
-        or requires_human_routing(f"{source.title}\n{source.excerpt}")
+        if source_requires_human_routing(source)
     }
     missing_ids = sorted(required_ids - existing_ids)
     if missing_ids:
@@ -115,8 +120,7 @@ def validate_draft(
     routed_source_ids = {
         source.source_id
         for source in sources
-        if source.lane == Lane.GENIUS_ACT
-        or requires_human_routing(f"{source.title}\n{source.excerpt}")
+        if source_requires_human_routing(source)
     }
     if draft.no_material_change and not coverage_complete:
         raise PolicyError("Incomplete search coverage cannot claim no material change")
@@ -175,5 +179,6 @@ __all__ = [
     "PolicyError",
     "requires_human_routing",
     "route_sensitive_sources",
+    "source_requires_human_routing",
     "validate_draft",
 ]
