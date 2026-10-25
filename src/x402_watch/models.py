@@ -79,8 +79,6 @@ class DraftBrief(StrictModel):
 
 class HailoTag(StrictModel):
     relevance: Literal["relevant", "not_relevant", "uncertain"]
-    lane: Lane | None = None
-    confidence: float = Field(ge=0.0, le=1.0)
 
 
 __all__ = [

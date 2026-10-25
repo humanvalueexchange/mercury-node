@@ -28,9 +28,16 @@ class HailoWorker:
             raise HailoWorkerError("Configured system Python for Hailo is missing")
         if not self._settings.hailo_model.is_file():
             raise HailoWorkerError("Configured Hailo HEF model is missing")
+        home = self._settings.data_dir / "hailo-home"
+        try:
+            home.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HailoWorkerError(
+                "Could not prepare the isolated Hailo worker home"
+            ) from exc
         source_root = str(Path(__file__).resolve().parents[1])
         environment = {
-            "HOME": "/nonexistent",
+            "HOME": str(home),
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "PYTHONNOUSERSITE": "1",
             "PYTHONPATH": source_root,

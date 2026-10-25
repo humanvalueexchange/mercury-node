@@ -8,9 +8,22 @@ service creation, repository creation, GitHub write, or timer enablement.
 
 - Application code, offline tests, and disabled systemd templates are in this
   repository.
-- Local validation on the implementation branch passes all 72 unittest tests
-  and Ruff checks; these tests use local fixtures and make no external API
-  requests.
+- PR #7 was merged into `main` on 2026-10-25. A user-space UAT copy was staged
+  at `/home/hermes/x402-watch-uat`; it is not a system installation or service.
+- The unmerged Hailo follow-up patch passes all 73 unittest tests and Ruff
+  checks; the tests use local fixtures and make no external API requests. The
+  patch is on the local `luna/x402-watch-hailo-home-fix` branch and has not been
+  pushed.
+- In the isolated UAT copy, `check-models` passed on 2026-10-25 for CPU Qwen3
+  at 32,768-token context and Hailo Qwen2.5-1.5B. The synthetic CPU check took
+  12.7 seconds and the Hailo check took 10.1 seconds. These are smoke-test
+  timings, not sustained throughput or thermal measurements.
+- The Hailo check exposed runtime integration requirements: HailoRT needs a
+  writable app-scoped `HOME`, rejects zero temperature even with greedy
+  decoding, and emits a terminal token plus punctuation around its label. The
+  follow-up worker now uses app-scoped state and strictly parses one of the
+  allowed relevance labels. Hailo tags remain advisory and cannot discard
+  sources.
 - The user downloaded the Qwen3-4B Q4_K_M GGUF, `llama.cpp` v0.7.0 source,
   Python wheels, and HailoRT 5.1.1-compatible Qwen2.5-1.5B HEF into
   `/home/hermes/downloads`.
@@ -28,7 +41,7 @@ service creation, repository creation, GitHub write, or timer enablement.
   and six JSON output tokens at 5.03 tokens/s. `MemAvailable` changed from
   15.21 GiB before loading to 8.23 GiB while loaded; temperature changed from
   56.8 C to 64.5 C. These are short smoke-test results, not sustained or
-  full-context measurements. Hailo inference remains untested.
+  full-context measurements.
 - Qwen3's default thinking mode returned empty message content after 128
   generated tokens, with output in the reasoning channel. Setting
   `chat_template_kwargs.enable_thinking=false` returned valid JSON; the
@@ -51,7 +64,7 @@ service creation, repository creation, GitHub write, or timer enablement.
 
 ## UAT sequence
 
-1. **Review staged code on the implementation branch.** Run the repository
+1. **Review staged code on `main` and any follow-up branch.** Run the repository
    tests and lint before any Pi installation. Tests use local fakes and do not
    contact Brave, GitHub, or source websites.
 2. **Use an isolated application prefix.** Before creating `/opt/x402-watch`,
