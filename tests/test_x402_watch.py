@@ -22,6 +22,7 @@ from x402_watch.cli import _check_models
 from x402_watch.config import ConfigurationError, Settings
 from x402_watch.db import Store
 from x402_watch.hailo import HailoWorker, HailoWorkerError
+from x402_watch.hailo_worker import _parse_tag
 from x402_watch.llm import LlamaDraftWriter, LocalModelError
 from x402_watch.models import (
     LANE_QUERIES,
@@ -232,20 +233,36 @@ class SourceFetcherTests(unittest.TestCase):
 
 
 class HailoWorkerTests(unittest.TestCase):
+    def test_parse_tag_removes_hailo_chat_end_token(self):
+        self.assertEqual(
+            _parse_tag("not_relevant.<|im_end|>"),
+            {"relevance": "not_relevant"},
+        )
+        with self.assertRaises(ValueError):
+            _parse_tag("unrecognized<|im_end|>")
+
     def test_worker_spawn_error_is_reported_as_optional_hailo_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             python = Path(directory) / "python"
             model = Path(directory) / "model.hef"
             python.write_text("placeholder", encoding="utf-8")
             model.write_bytes(b"placeholder")
+            data_dir = Path(directory) / "state"
             worker = HailoWorker(
-                Settings(hailo_python=python, hailo_model=model)
+                Settings(data_dir=data_dir, hailo_python=python, hailo_model=model)
             )
             with patch(
                 "x402_watch.hailo.subprocess.Popen",
                 side_effect=OSError("cannot execute"),
-            ), self.assertRaises(HailoWorkerError):
-                worker.start()
+            ) as spawn:
+                with self.assertRaises(HailoWorkerError):
+                    worker.start()
+                hailo_home = data_dir / "hailo-home"
+                self.assertTrue(hailo_home.is_dir())
+                self.assertEqual(
+                    spawn.call_args.kwargs["env"]["HOME"],
+                    str(hailo_home),
+                )
 
 
 class LocalPromptTests(unittest.TestCase):
@@ -757,11 +774,7 @@ class _FakeFetcher:
 
 class _FakeTagger:
     def classify(self, hit: SearchHit) -> HailoTag:
-        return HailoTag(
-            relevance="not_relevant",
-            lane=None,
-            confidence=0.9,
-        )
+        return HailoTag(relevance="not_relevant")
 
     def stop(self) -> None:
         return None

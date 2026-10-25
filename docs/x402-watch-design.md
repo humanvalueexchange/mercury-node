@@ -170,9 +170,11 @@ daily orchestrator --------------------------- local SQLite state
   credential directory and uses HTTPS for Brave and public source retrieval.
 - **Hailo worker:** runs as a separate short-lived process, receives only a
   bounded title/snippet over stdin, and is started with a minimal environment
-  that omits systemd credential paths. Its tags are advisory; it cannot discard
-  evidence. It currently shares the service UID, so omitting the credential
-  path from its environment is not a hard filesystem or credential boundary.
+  that omits systemd credential paths. Its `HOME` is an app-scoped writable
+  directory under the data directory so HailoRT can initialize its local state.
+  Its tags are advisory; it cannot discard evidence. It currently shares the
+  service UID, so omitting the credential path from its environment is not a
+  hard filesystem or credential boundary.
   A separate OS identity/network sandbox remains a deployment hardening item
   and is not yet verified.
 - **CPU model worker:** `llama-server` is short-lived, binds only to loopback,
@@ -336,36 +338,36 @@ Before enabling a daily timer, an approved pilot must demonstrate:
 
 ## 9. Approval gates
 
-The implementation is staged on `luna/x402-watch-implementation`. Neither
-systemd unit has been installed or enabled, and there has been no repository
-creation, credential provisioning, or brief publication. Hans authorized an
-isolated CPU/Hailo proof-of-fit/build for this implementation; that does not
-authorize inspection of unrelated host software, system installation, service
-creation, or publication. Proceed in separate stages:
+PR #7 is merged to `main`. On 2026-10-25, the authorized bounded model check
+passed in the user-space UAT copy at `/home/hermes/x402-watch-uat`: Qwen3-4B
+CPU inference at 32K context and Qwen2.5-1.5B Hailo inference both returned
+success for synthetic input. The Hailo check used local follow-up code on
+`luna/x402-watch-hailo-home-fix`; those changes are not yet in `main` or pushed.
+No system package was installed, no systemd unit was installed or enabled, and
+there has been no credential provisioning, target-repository creation, or
+publication. The model check does not establish sustained thermal performance
+or filesystem isolation.
 
-1. Run the already-authorized bounded CPU/Hailo proof-of-fit from the
-   user-downloaded artifacts in dedicated x402-watch paths. Use a safe window;
-   do not inventory existing packages or services, overclock, access the
-   Bitcoin volume, or change networking.
-2. Review results, then separately approve any software installation, Hailo
-   runtime changes, service identity, filesystem namespace, or timer creation.
-   The staged service hides common external-mount roots, but that does not
-   prove the Bitcoin/Lightning volume is inaccessible. Hans must confirm its
-   mount path without authorizing access to its contents; add that exact path
-   to the service sandbox and verify invisibility before installation. If a
-   possible conflict with existing software appears, stop and ask rather than
-   inspect it.
-3. Provision the Brave key locally. Separately approve creation/configuration
-   of the initially private `HansHWestphal/x402-watch` repository and its
-   repository-scoped publisher identity.
-4. Run a local dry run and review the output. The staged timer uses 06:00 local
-   time as a placeholder only; change/approve the schedule before enabling it.
-5. Separately approve the first GitHub write and recurring private publication.
+Proceed in separate stages:
 
-No host installation, service change, credential provisioning, repository
-creation, brief publication, or timer activation has been performed as part of
-this implementation. The downloaded model/build artifacts remain uninstalled
-and have not been loaded by the application.
+1. Review and separately approve pushing/opening a PR for the Hailo follow-up
+   fixes; merge them before treating Hailo support as part of `main`.
+2. Provision the Brave key locally in protected storage, then separately
+   approve a live, non-publishing dry run. It will call Brave Search and fetch
+   public source pages, writing only to the local UAT data directory.
+3. Review the local brief. Separately approve creation of the initially private
+   `HansHWestphal/x402-watch` repository and its repository-scoped publisher
+   identity before any GitHub write.
+4. Approve the first private publication only after reviewing the brief.
+5. Before system installation or scheduling, confirm the external
+   Bitcoin/Lightning mount path without accessing its contents, add that exact
+   path to the service sandbox, verify it is invisible, review resource and
+   Hailo-device isolation, and approve the service/timer and schedule. The
+   staged `06:00` local-time schedule is only a placeholder.
+
+Do not inventory unrelated host software, overclock, access the Bitcoin volume,
+or change networking. If a possible conflict with existing software appears,
+stop and ask rather than inspect it.
 
 ## 10. Technical references
 
