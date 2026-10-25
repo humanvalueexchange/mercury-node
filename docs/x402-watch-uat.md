@@ -10,10 +10,9 @@ service creation, repository creation, GitHub write, or timer enablement.
   repository.
 - PR #7 was merged into `main` on 2026-10-25. A user-space UAT copy was staged
   at `/home/hermes/x402-watch-uat`; it is not a system installation or service.
-- The unmerged Hailo follow-up patch passes all 73 unittest tests and Ruff
-  checks; the tests use local fixtures and make no external API requests. The
-  patch is on the local `luna/x402-watch-hailo-home-fix` branch and has not been
-  pushed.
+- PR #8, which hardens the Hailo worker, is merged into `main`.
+  All 73 offline tests and Ruff checks passed; tests use local fixtures and
+  make no external API requests.
 - In the isolated UAT copy, `check-models` passed on 2026-10-25 for CPU Qwen3
   at 32,768-token context and Hailo Qwen2.5-1.5B. The synthetic CPU check took
   12.7 seconds and the Hailo check took 10.1 seconds. These are smoke-test
@@ -46,11 +45,17 @@ service creation, repository creation, GitHub write, or timer enablement.
   generated tokens, with output in the reasoning channel. Setting
   `chat_template_kwargs.enable_thinking=false` returned valid JSON; the
   application now sets this option for draft requests.
-- The Brave key has not been provisioned to this application. The private
+- A protected local copy of the Brave key is provisioned; the private
   `HansHWestphal/x402-watch` repository and its scoped GitHub App are not
   provisioned.
-- No recurring job or GitHub publication is enabled. A live daily run must
-  fail closed until the required local secrets and private repository exist.
+- The first approved live dry run reached local CPU synthesis but exceeded the
+  original 240-second request timeout. No brief was written or published. A
+  local follow-up preserves the 2,600-token output budget and raises the model
+  request timeout; it must be reviewed and deployed to the UAT copy before a
+  retry.
+- No recurring job or GitHub publication is enabled. Publication remains
+  blocked until the private target repository and scoped credentials are
+  provisioned and separately approved.
 - The timer's `06:00` local-time schedule is a placeholder and must be approved
   or changed before enabling.
 - The staged service hides common external-mount roots (`/mnt`, `/media`,
@@ -135,7 +140,8 @@ future-dated runs are rejected.
 - CPU inference uses the downloaded Q4_K_M model at native 32K context, one
   sequence, three CPU threads, zero GPU layers, `--no-ui`, and
   `chat_template_kwargs.enable_thinking=false`; the JSON response is parsed
-  into the strict draft schema.
+  into the strict draft schema. Draft requests retain the 2,600-token output
+  budget and have a bounded 2,400-second timeout for CPU-only synthesis.
 - Model prompts omit full URLs, bound source fields, and reject evidence packets
   above 20,000 serialized characters; summaries are deterministic, not model
   generated.
