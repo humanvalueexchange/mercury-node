@@ -8,6 +8,7 @@ import socket
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from time import monotonic
 from typing import Self
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -20,8 +21,45 @@ from .models import EvidenceSource, Lane, SearchHit
 from .urls import UnsafeUrlError, canonicalize_url, resolve_public_url
 
 
+class SourceFetchFailureCategory(str, Enum):
+    REQUEST_TIMEOUT = "request_timeout"
+    UNSAFE_URL = "unsafe_url"
+    REDIRECT_MISSING_TARGET = "redirect_missing_target"
+    REDIRECT_LIMIT = "redirect_limit"
+    HTTP_STATUS = "http_status"
+    NON_HTML_CONTENT = "non_html_content"
+    COMPRESSED_RESPONSE = "compressed_response"
+    INVALID_CONTENT_LENGTH = "invalid_content_length"
+    RESPONSE_TOO_LARGE = "response_too_large"
+    REQUEST_FAILED = "request_failed"
+    REDIRECT_HANDLING_FAILED = "redirect_handling_failed"
+
+
 class SourceFetchError(RuntimeError):
     """Raised when a public source cannot be safely retrieved."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: SourceFetchFailureCategory,
+        status_code: int | None = None,
+    ):
+        super().__init__(message)
+        if (category is SourceFetchFailureCategory.HTTP_STATUS) != (
+            status_code is not None
+        ):
+            raise ValueError("HTTP status diagnostics require a matching status code")
+        if status_code is not None and not 100 <= status_code <= 599:
+            raise ValueError("HTTP status code is invalid")
+        self.category = category
+        self.status_code = status_code
+
+    @property
+    def diagnostic_code(self) -> str:
+        if self.status_code is not None:
+            return f"http_status_{self.status_code}"
+        return self.category.value
 
 
 class SourceExtractionError(RuntimeError):
@@ -107,14 +145,20 @@ class PublicPageFetcher:
         deadline = monotonic() + self._max_duration
         for redirect_count in range(self._max_redirects + 1):
             if monotonic() >= deadline:
-                raise SourceFetchError("Source request exceeded the time limit")
+                raise SourceFetchError(
+                    "Source request exceeded the time limit",
+                    category=SourceFetchFailureCategory.REQUEST_TIMEOUT,
+                )
             try:
                 safe_url, address = resolve_public_url(
                     current,
                     resolver=self._resolver,
                 )
             except UnsafeUrlError as exc:
-                raise SourceFetchError(str(exc)) from exc
+                raise SourceFetchError(
+                    str(exc),
+                    category=SourceFetchFailureCategory.UNSAFE_URL,
+                ) from exc
             parsed = urlsplit(safe_url)
             ip = ipaddress.ip_address(address)
             pinned_host = f"[{ip.compressed}]" if ip.version == 6 else ip.compressed
@@ -149,57 +193,92 @@ class PublicPageFetcher:
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location")
                         if not location:
-                            raise SourceFetchError("Source redirect omitted its target")
+                            raise SourceFetchError(
+                                "Source redirect omitted its target",
+                                category=(
+                                    SourceFetchFailureCategory.REDIRECT_MISSING_TARGET
+                                ),
+                            )
                         if redirect_count == self._max_redirects:
-                            raise SourceFetchError("Source exceeded the redirect limit")
+                            raise SourceFetchError(
+                                "Source exceeded the redirect limit",
+                                category=SourceFetchFailureCategory.REDIRECT_LIMIT,
+                            )
                         current = urljoin(safe_url, location)
                         continue
                     if response.status_code < 200 or response.status_code >= 300:
                         raise SourceFetchError(
-                            f"Source returned HTTP {response.status_code}"
+                            f"Source returned HTTP {response.status_code}",
+                            category=SourceFetchFailureCategory.HTTP_STATUS,
+                            status_code=response.status_code,
                         )
                     content_type = response.headers.get("content-type", "").lower()
                     if not content_type.startswith(
                         ("text/html", "application/xhtml+xml")
                     ):
-                        raise SourceFetchError("Source is not an HTML page")
+                        raise SourceFetchError(
+                            "Source is not an HTML page",
+                            category=SourceFetchFailureCategory.NON_HTML_CONTENT,
+                        )
                     content_encoding = response.headers.get(
                         "content-encoding",
                         "identity",
                     ).strip().lower()
                     if content_encoding not in {"", "identity"}:
                         raise SourceFetchError(
-                            "Compressed source responses are not supported"
+                            "Compressed source responses are not supported",
+                            category=SourceFetchFailureCategory.COMPRESSED_RESPONSE,
                         )
                     content_length = response.headers.get("content-length")
                     if content_length:
                         if not content_length.isdigit():
                             raise SourceFetchError(
-                                "Source returned an invalid content length"
+                                "Source returned an invalid content length",
+                                category=(
+                                    SourceFetchFailureCategory.INVALID_CONTENT_LENGTH
+                                ),
                             )
                         declared_length = content_length.lstrip("0") or "0"
                         if (
                             len(declared_length) > len(str(self._max_bytes))
                             or int(declared_length) > self._max_bytes
                         ):
-                            raise SourceFetchError("Source exceeded the byte limit")
+                            raise SourceFetchError(
+                                "Source exceeded the byte limit",
+                                category=SourceFetchFailureCategory.RESPONSE_TOO_LARGE,
+                            )
                     body = bytearray()
                     for chunk in response.iter_bytes():
                         if monotonic() >= deadline:
                             raise SourceFetchError(
-                                "Source request exceeded the time limit"
+                                "Source request exceeded the time limit",
+                                category=SourceFetchFailureCategory.REQUEST_TIMEOUT,
                             )
                         body.extend(chunk)
                         if len(body) > self._max_bytes:
-                            raise SourceFetchError("Source exceeded the byte limit")
+                            raise SourceFetchError(
+                                "Source exceeded the byte limit",
+                                category=SourceFetchFailureCategory.RESPONSE_TOO_LARGE,
+                            )
                     return FetchedPage(
                         url=safe_url,
                         html=bytes(body),
                         content_type=content_type,
                     )
+            except httpx.TimeoutException as exc:
+                raise SourceFetchError(
+                    "Source request timed out",
+                    category=SourceFetchFailureCategory.REQUEST_TIMEOUT,
+                ) from exc
             except httpx.HTTPError as exc:
-                raise SourceFetchError("Public source request failed") from exc
-        raise SourceFetchError("Source redirect handling failed")
+                raise SourceFetchError(
+                    "Public source request failed",
+                    category=SourceFetchFailureCategory.REQUEST_FAILED,
+                ) from exc
+        raise SourceFetchError(
+            "Source redirect handling failed",
+            category=SourceFetchFailureCategory.REDIRECT_HANDLING_FAILED,
+        )
 
     def close(self) -> None:
         if self._owns_client:
@@ -270,6 +349,7 @@ __all__ = [
     "PublicPageFetcher",
     "SourceExtractionError",
     "SourceFetchError",
+    "SourceFetchFailureCategory",
     "extract_source",
 ]
 
