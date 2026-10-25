@@ -117,7 +117,7 @@ fit. No Mercury software inventory is part of this design.
 | Layer | Required software |
 |---|---|
 | Base | 64-bit ARM Linux. Prefer a `systemd` timer and one-shot service if the selected OS supports them. Accurate system time is required for daily scheduling and retrieval timestamps. |
-| Orchestration | Python 3.13 in an isolated virtual environment; pinned `httpx`, `trafilatura`, `pydantic`, `PyJWT`, and `cryptography` requirements are in `requirements-x402-watch.txt`. JSON, hashing, dates, file locking, and SQLite use the standard library. |
+| Orchestration | Python 3.13 in an isolated virtual environment; pinned `httpx`, `playwright`, `trafilatura`, `pydantic`, `PyJWT`, and `cryptography` requirements are in `requirements-x402-watch.txt`. Brave, model, and GitHub API clients use `httpx`; public source pages are retrieved with Playwright Chromium. JSON, hashing, dates, file locking, and SQLite use the standard library. |
 | CPU inference | ARM64 CPU build of `llama.cpp` v0.7.0 from the user-downloaded source archive; a short-lived `llama-server` binds to `127.0.0.1:8090`. Configure one sequence, three CPU threads, native 32K context, zero GPU layers, and `--no-ui`; send `chat_template_kwargs.enable_thinking=false` so Qwen3 returns the JSON draft instead of spending a short output budget in its reasoning channel. Stop the server after synthesis. |
 | Hailo inference | A compatible HailoRT/PyHailoRT 5.1.1 runtime and `hailo_platform.genai.LLM` with the Hailo v5.1.1 Qwen2.5-1.5B-Instruct HEF. Runtime compatibility, model load, and inference require the approved on-device proof-of-fit; do not install or replace system Hailo software without separate approval. The full audio/video application bundle is not needed. |
 | Local state | SQLite on internal storage, a private local outbox, same-day idempotent repository path, and a non-overlap file lock. No vector store or hosted embeddings; deduplication uses canonical URLs and content hashes. |
@@ -145,7 +145,7 @@ daily orchestrator --------------------------- local SQLite state
     |                                                   ^
     +-- Brave Search --> candidate URLs                 |
     |                         |                         |
-    |                         +-- CPU fetch/parse -------+
+    |                         +-- Playwright fetch/parse+
     |                         |
     |                         +-- Hailo short-text tags -+
     |                                                   |
@@ -167,7 +167,11 @@ daily orchestrator --------------------------- local SQLite state
 ### Process and credential separation
 
 - **Collector/orchestrator:** reads the Brave credential from the systemd
-  credential directory and uses HTTPS for Brave and public source retrieval.
+  credential directory and uses HTTPS for Brave and Playwright for public
+  source retrieval. Browser contexts are fresh per page, downloads and service
+  workers are disabled, non-GET requests and private destinations are blocked,
+  and no custom user-agent or stealth settings are applied. The browser process
+  receives a minimal environment without credential-directory variables.
 - **Hailo worker:** runs as a separate short-lived process, receives only a
   bounded title/snippet over stdin, and is started with a minimal environment
   that omits systemd credential paths. Its `HOME` is an app-scoped writable

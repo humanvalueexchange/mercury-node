@@ -18,7 +18,7 @@ from .hailo import HailoWorker, HailoWorkerError
 from .llm import LlamaDraftWriter, LocalLlamaServer, LocalModelError
 from .pipeline import DailyPipeline, PipelineError
 from .publisher import GitHubAppPublisher, GitHubPublishError
-from .sources import PublicPageFetcher
+from .sources import PlaywrightPageFetcher
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -78,7 +78,7 @@ def _run_daily(args: argparse.Namespace, settings: Settings) -> int:
             )
         )
         fetcher = stack.enter_context(
-            PublicPageFetcher(
+            PlaywrightPageFetcher(
                 max_bytes=settings.max_source_bytes,
                 max_redirects=settings.max_redirects,
                 timeout=settings.fetch_timeout_seconds,

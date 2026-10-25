@@ -12,7 +12,8 @@ from argparse import Namespace
 from contextlib import nullcontext
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 import httpx
 from cryptography.hazmat.primitives import serialization
@@ -45,7 +46,7 @@ from x402_watch.publisher import GitHubAppPublisher, GitHubPublishError
 from x402_watch.render import render_brief
 from x402_watch.sources import (
     FetchedPage,
-    PublicPageFetcher,
+    PlaywrightPageFetcher,
     SourceFetchError,
     SourceFetchFailureCategory,
 )
@@ -149,130 +150,203 @@ class CliDiagnosticsTests(unittest.TestCase):
 
 
 class SourceFetcherTests(unittest.TestCase):
-    def test_http_status_error_has_a_sanitized_diagnostic_code(self):
-        def handler(request):
-            return httpx.Response(429, text="Private response detail")
+    def _fake_playwright(
+        self,
+        *,
+        status: int = 200,
+        html: bytes = b"<html><body><p>Rendered update</p></body></html>",
+        content_type: str = "text/html",
+        content_length: str | None = None,
+        final_url: str = "https://example.com/article",
+        followups: tuple[tuple[str, str, str, bool], ...] = (),
+    ):
+        response = Mock()
+        response.status = status
+        response.header_value.side_effect = lambda name: {
+            "content-type": content_type,
+            "content-length": content_length,
+        }.get(name)
+        routes = []
+        page = Mock()
+        page.url = final_url
+        page.content.return_value = html.decode("utf-8")
 
-        def public_resolver(host, port, type):
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    socket.IPPROTO_TCP,
-                    "",
-                    ("93.184.216.34", port),
+        def goto(url, **kwargs):
+            initial_request = SimpleNamespace(
+                url=url,
+                method="GET",
+                resource_type="document",
+                redirected_from=None,
+            )
+            requests = [(initial_request, None)]
+            previous_request = initial_request
+            for followup_url, method, resource_type, is_redirect in followups:
+                request = SimpleNamespace(
+                    url=followup_url,
+                    method=method,
+                    resource_type=resource_type,
+                    redirected_from=previous_request if is_redirect else None,
                 )
-            ]
+                requests.append((request, None))
+                if is_redirect:
+                    previous_request = request
+            for request, _ in requests:
+                route = Mock()
+                route.request = request
+                routes.append(route)
+                context.route_handler(route)
+            return response
 
-        client = httpx.Client(transport=httpx.MockTransport(handler))
-        fetcher = PublicPageFetcher(client=client, resolver=public_resolver)
-        try:
+        page.goto.side_effect = goto
+        context = Mock()
+        context.route.side_effect = lambda _pattern, handler: setattr(
+            context,
+            "route_handler",
+            handler,
+        )
+        context.new_page.return_value = page
+        browser = Mock()
+        browser.new_context.return_value = context
+        launch = Mock(return_value=browser)
+        manager = MagicMock()
+        manager.__enter__.return_value = SimpleNamespace(
+            chromium=SimpleNamespace(launch=launch)
+        )
+        return manager, launch, browser, context, page, routes
+
+    @staticmethod
+    def _public_resolver(host, port, type):
+        address = "127.0.0.1" if host == "127.0.0.1" else "93.184.216.34"
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (address, port),
+            )
+        ]
+
+    def test_playwright_fetch_returns_rendered_html_in_a_fresh_context(self):
+        manager, launch, browser, context, page, routes = self._fake_playwright()
+        with (
+            patch("x402_watch.sources.sync_playwright", return_value=manager),
+            patch.dict(
+                "os.environ",
+                {
+                    "PATH": "/usr/bin",
+                    "SYSTEMD_CREDENTIALS_DIRECTORY": "/run/credentials/private",
+                },
+                clear=True,
+            ),
+        ):
+            fetcher = PlaywrightPageFetcher(resolver=self._public_resolver)
+            result = fetcher.fetch("https://example.com/article?utm_source=test")
+
+        self.assertEqual(result.url, "https://example.com/article")
+        self.assertEqual(
+            result.html,
+            b"<html><body><p>Rendered update</p></body></html>",
+        )
+        self.assertEqual(result.content_type, "text/html")
+        launch.assert_called_once()
+        browser.new_context.assert_called_once_with(
+            accept_downloads=False,
+            service_workers="block",
+        )
+        self.assertNotIn(
+            "SYSTEMD_CREDENTIALS_DIRECTORY",
+            launch.call_args.kwargs["env"],
+        )
+        self.assertEqual(page.goto.call_args.args, ("https://example.com/article",))
+        self.assertEqual(page.goto.call_args.kwargs["wait_until"], "domcontentloaded")
+        self.assertGreater(page.goto.call_args.kwargs["timeout"], 0)
+        self.assertLessEqual(page.goto.call_args.kwargs["timeout"], 20_000)
+        self.assertTrue(routes[0].continue_.called)
+        context.close.assert_called_once()
+        browser.close.assert_called_once()
+
+    def test_http_status_error_has_a_sanitized_diagnostic_code(self):
+        manager, *_ = self._fake_playwright(
+            status=403,
+            html=b"Private response detail",
+        )
+        with patch("x402_watch.sources.sync_playwright", return_value=manager):
+            fetcher = PlaywrightPageFetcher(resolver=self._public_resolver)
             with self.assertRaises(SourceFetchError) as context:
                 fetcher.fetch("https://example.com/article?token=fixture-secret")
-            self.assertEqual(context.exception.diagnostic_code, "http_status_429")
+            self.assertEqual(context.exception.diagnostic_code, "http_status_403")
             self.assertNotIn("fixture-secret", context.exception.diagnostic_code)
             self.assertNotIn("Private response detail", context.exception.diagnostic_code)
-        finally:
-            client.close()
 
-    def test_redirect_to_private_address_is_rejected_before_second_request(self):
-        requests = []
-        resolved_hosts = []
-
-        def handler(request):
-            requests.append(request)
-            return httpx.Response(
-                302,
-                headers={"location": "http://127.0.0.1/private"},
+    def test_private_redirect_is_blocked_before_browser_continues_it(self):
+        manager, _, _, _, _, routes = self._fake_playwright(
+            followups=(
+                ("http://127.0.0.1/private", "GET", "document", True),
             )
+        )
+        with patch("x402_watch.sources.sync_playwright", return_value=manager):
+            fetcher = PlaywrightPageFetcher(resolver=self._public_resolver)
+            with self.assertRaises(SourceFetchError) as context:
+                fetcher.fetch("https://example.com/article")
 
-        def resolver(host, port, type):
-            resolved_hosts.append(host)
-            address = "127.0.0.1" if host == "127.0.0.1" else "93.184.216.34"
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    socket.IPPROTO_TCP,
-                    "",
-                    (address, port),
-                )
-            ]
+        self.assertEqual(
+            context.exception.category,
+            SourceFetchFailureCategory.UNSAFE_URL,
+        )
+        self.assertTrue(routes[1].abort.called)
+        self.assertFalse(routes[1].continue_.called)
 
-        client = httpx.Client(transport=httpx.MockTransport(handler))
-        fetcher = PublicPageFetcher(client=client, resolver=resolver)
-        try:
-            with self.assertRaises(SourceFetchError):
-                fetcher.fetch("https://example.com/")
-            self.assertEqual(len(requests), 1)
-            self.assertEqual(requests[0].url.host, "93.184.216.34")
-            self.assertEqual(requests[0].headers["host"], "example.com")
-            self.assertEqual(
-                requests[0].extensions["sni_hostname"],
-                b"example.com",
+    def test_redirect_limit_is_enforced(self):
+        manager, _, _, _, _, routes = self._fake_playwright(
+            followups=(
+                ("https://example.com/step-one", "GET", "document", True),
+                ("https://example.com/step-two", "GET", "document", True),
             )
-            self.assertEqual(resolved_hosts, ["example.com", "127.0.0.1"])
-        finally:
-            client.close()
-
-    def test_extreme_content_length_is_rejected_without_integer_overflow(self):
-        def handler(request):
-            return httpx.Response(
-                200,
-                headers={
-                    "content-type": "text/html",
-                    "content-length": "9" * 5000,
-                },
+        )
+        with patch("x402_watch.sources.sync_playwright", return_value=manager):
+            fetcher = PlaywrightPageFetcher(
+                max_redirects=1,
+                resolver=self._public_resolver,
             )
+            with self.assertRaises(SourceFetchError) as context:
+                fetcher.fetch("https://example.com/article")
 
-        def public_resolver(host, port, type):
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    socket.IPPROTO_TCP,
-                    "",
-                    ("93.184.216.34", port),
-                )
-            ]
+        self.assertEqual(
+            context.exception.category,
+            SourceFetchFailureCategory.REDIRECT_LIMIT,
+        )
+        self.assertTrue(routes[2].abort.called)
 
-        client = httpx.Client(transport=httpx.MockTransport(handler))
-        fetcher = PublicPageFetcher(client=client, resolver=public_resolver)
-        try:
-            with self.assertRaises(SourceFetchError):
-                fetcher.fetch("https://example.com/")
-        finally:
-            client.close()
-
-    def test_compressed_source_response_is_rejected(self):
-        def handler(request):
-            return httpx.Response(
-                200,
-                headers={
-                    "content-type": "text/html",
-                    "content-encoding": "gzip",
-                },
-                content=b"not decompressed",
+    def test_rendered_document_byte_limit_is_enforced(self):
+        manager, *_ = self._fake_playwright(html=b"x" * 1025)
+        with patch("x402_watch.sources.sync_playwright", return_value=manager):
+            fetcher = PlaywrightPageFetcher(
+                max_bytes=1024,
+                resolver=self._public_resolver,
             )
+            with self.assertRaises(SourceFetchError) as context:
+                fetcher.fetch("https://example.com/article")
 
-        def public_resolver(host, port, type):
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    socket.IPPROTO_TCP,
-                    "",
-                    ("93.184.216.34", port),
-                )
-            ]
+        self.assertEqual(
+            context.exception.category,
+            SourceFetchFailureCategory.RESPONSE_TOO_LARGE,
+        )
 
-        client = httpx.Client(transport=httpx.MockTransport(handler))
-        fetcher = PublicPageFetcher(client=client, resolver=public_resolver)
-        try:
-            with self.assertRaises(SourceFetchError):
-                fetcher.fetch("https://example.com/")
-        finally:
-            client.close()
+    def test_non_get_browser_requests_are_blocked(self):
+        manager, _, _, _, _, routes = self._fake_playwright(
+            followups=(("https://example.com/submit", "POST", "xhr", False),)
+        )
+        with patch("x402_watch.sources.sync_playwright", return_value=manager):
+            fetcher = PlaywrightPageFetcher(resolver=self._public_resolver)
+            with self.assertRaises(SourceFetchError) as context:
+                fetcher.fetch("https://example.com/article")
+
+        self.assertEqual(
+            context.exception.category,
+            SourceFetchFailureCategory.UNSAFE_REQUEST,
+        )
+        self.assertTrue(routes[1].abort.called)
 
 
 class HailoWorkerTests(unittest.TestCase):

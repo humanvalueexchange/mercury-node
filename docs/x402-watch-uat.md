@@ -105,7 +105,9 @@ service creation, repository creation, GitHub write, or timer enablement.
    `requirements-x402-watch.txt` and the downloaded wheel directory with
    `pip --no-index`; do not change global Python packages. Confirm compatible
    HailoRT/Python bindings during the approved proof-of-fit; do not install or
-   replace the system Hailo runtime without separate approval.
+   replace the system Hailo runtime without separate approval. Install the
+   matching Chromium build with `python -m playwright install chromium` in the
+   same venv; this browser download is separate from the Python wheel install.
 5. **Place model artifacts under the isolated prefix.** The expected names are
    `Qwen3-4B-Q4_K_M.gguf` and
    `Qwen2.5-1.5B-Instruct-v5.1.1.hef`. Verify hashes and file sizes before
@@ -116,14 +118,20 @@ service creation, repository creation, GitHub write, or timer enablement.
    peak memory, and temperature at stock settings. A Hailo failure is a
    blocker to Hailo acceptance but must not trigger runtime replacement.
 7. **Review a live dry run only after the Brave credential is provisioned.**
-   It searches the four approved lanes, retrieves public pages with bounded
-   concurrency, public-IP pinning, redirect checks, and response limits,
-   creates a local private brief, and does not publish unless `--publish` is
-   explicitly provided and the environment gate is enabled. Only the current
-   local date is accepted; backdated briefs are rejected. The first complete
-   run is a baseline, not a no-change claim. Review source-site terms and
-   robots rules before enabling recurring retrieval; the current fetcher does
-   not automate robots.txt checks or per-domain pacing.
+   It searches the four approved lanes and retrieves public pages with
+   Playwright Chromium, fresh non-persistent browser contexts, URL checks on
+   browser requests, redirect and request-count limits, and a rendered-document
+   size limit; that limit does not cap total subresource transfer. Chromium
+   performs its own DNS resolution, so this is not equivalent to the previous
+   socket-level IP pinning; verify network egress restrictions against private,
+   reserved, and link-local ranges before any recurring run. The dry run
+   creates a local private brief and does not
+   publish unless `--publish` is explicitly provided and the environment gate
+   is enabled. Only the current local date is accepted; backdated briefs are
+   rejected. The first complete run is a baseline, not a no-change claim.
+   Review source-site terms and robots rules before enabling recurring
+   retrieval; the fetcher does not automate robots.txt checks or per-domain
+   pacing.
 8. **Keep the GitHub gate closed until separate approval.** Create the target
    repository as private, install an App on that repository only, grant
    Contents write permission only, provision its private key via systemd
