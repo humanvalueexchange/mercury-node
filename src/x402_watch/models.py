@@ -17,16 +17,36 @@ class Lane(str, Enum):
 
 LANE_QUERIES: dict[Lane, tuple[str, ...]] = {
     Lane.X402_ACP: (
-        '("x402" OR "Agentic Commerce Protocol" OR ACP) adoption announcement',
+        (
+            '("x402" OR "Agentic Commerce Protocol") '
+            '(adoption OR announcement OR release OR integration) '
+            '(site:coinbase.com OR site:docs.cdp.coinbase.com OR '
+            'site:x402.org OR site:stripe.com)'
+        ),
+        'site:www.donvitocodes.com/ai-news ("x402" OR "Agentic Commerce Protocol")',
     ),
     Lane.GENIUS_ACT: (
-        '"GENIUS Act" implementation official guidance',
+        (
+            '"GENIUS Act" (implementation OR guidance OR rulemaking) '
+            '(site:congress.gov OR site:fdic.gov OR site:federalreserve.gov OR '
+            'site:occ.gov OR site:sec.gov OR site:treasury.gov)'
+        ),
+        'site:www.donvitocodes.com/ai-news "GENIUS Act"',
     ),
     Lane.STABLECOIN_VOLUME: (
-        "stablecoin transaction volume card network volume primary source",
+        (
+            "stablecoin transaction volume card network payment volume "
+            "(site:federalreserve.gov OR site:mastercard.com OR site:sec.gov OR "
+            "site:treasury.gov OR site:visa.com)"
+        ),
+        "site:www.donvitocodes.com/ai-news stablecoin card network volume",
     ),
     Lane.STRIPE_OPENROUTER: (
-        'Stripe OpenRouter integration announcement OR follow-up',
+        (
+            '"Stripe" "OpenRouter" (integration OR partnership OR follow-up OR launch) '
+            '(site:openrouter.ai OR site:stripe.com)'
+        ),
+        "site:www.donvitocodes.com/ai-news Stripe OpenRouter",
     ),
 }
 

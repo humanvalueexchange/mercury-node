@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .models import DraftBrief, EvidenceSource, HeldItem, Lane
+from .models import DraftBrief, EvidenceSource, HeldItem
 
 
 class PolicyError(ValueError):
@@ -47,9 +47,7 @@ def requires_human_routing(text: str) -> bool:
 
 
 def source_requires_human_routing(source: EvidenceSource) -> bool:
-    return source.lane == Lane.GENIUS_ACT or requires_human_routing(
-        f"{source.title}\n{source.excerpt}"
-    )
+    return requires_human_routing(f"{source.title}\n{source.excerpt}")
 
 
 def route_sensitive_sources(
@@ -69,7 +67,7 @@ def route_sensitive_sources(
     }
     missing_ids = sorted(required_ids - existing_ids)
     if missing_ids:
-        group_title = "Financial, legal, or tax items held for review"
+        group_title = "Financial, legal, or tax items held for Hans's review"
         group_index = next(
             (
                 index
@@ -92,7 +90,7 @@ def route_sensitive_sources(
                     title=group_title,
                     source_ids=missing_ids,
                     reason=(
-                        "Held for hve-cfo/Brian review; no financial, legal, or tax "
+                        "Held for Hans's review; no financial, legal, or tax "
                         "interpretation was generated."
                     ),
                 )
