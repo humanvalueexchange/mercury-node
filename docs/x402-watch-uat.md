@@ -92,10 +92,20 @@ service creation, repository creation, GitHub write, or timer enablement.
   9 sources were secondary and the 7 generated claims were not editorially
   acceptable: the stablecoin/card-volume claim relied on a 2017 Wikipedia
   entry, and the Stripe/OpenRouter lane included unrelated material. The two
-  GENIUS Act items were correctly held for hve-cfo/Brian review. The draft is
-  not publishable; a passing policy gate does not establish factual support or
-  usefulness. CPU generation averaged about 1.75 tokens/s and the run took
-  11m22s; this is not sustained resource or thermal validation.
+  GENIUS Act items were held under the prior blanket rule; they should have
+  appeared as private, cited summaries for Hans rather than being held by lane.
+  The draft is not publishable; a passing policy gate does not establish
+  factual support or usefulness. CPU generation averaged about 1.75 tokens/s
+  and the run took 11m22s; this is not sustained resource or thermal validation.
+- Reviewer routing for this Mercury-only assignment is Hans-only. Any held
+  financial, legal, or tax interpretations are addressed to Hans; neutral
+  factual reporting about the GENIUS Act lane is no longer held automatically.
+  The pipeline still avoids presenting advice or unsupported interpretations.
+- Search now separates x402 from the Agentic Commerce Protocol (without using
+  bare `ACP`), uses lane-specific primary-domain queries, and adds a separate
+  `site:www.donvitocodes.com/ai-news` query for each monitoring lane. Don Vito
+  Codes AI News remains a secondary discovery source; use its leads to find
+  primary evidence when available rather than treating the aggregator as primary.
 - No recurring job or GitHub publication is enabled. Publication remains
   blocked until the private target repository and scoped credentials are
   provisioned and separately approved.

@@ -52,6 +52,8 @@ from x402_watch.sources import (
 )
 from x402_watch.urls import UnsafeUrlError, canonicalize_url, validate_public_url
 
+_TOTAL_SEARCH_QUERY_COUNT = sum(len(queries) for queries in LANE_QUERIES.values())
+
 
 def make_source(
     lane: Lane = Lane.X402_ACP,
@@ -136,6 +138,42 @@ class ConfigurationTests(unittest.TestCase):
     def test_brave_key_cannot_be_sent_to_a_non_brave_endpoint(self):
         with self.assertRaises(ConfigurationError):
             BraveSearchClient("test-key", endpoint="https://example.com/search")
+
+
+class SearchQueryTests(unittest.TestCase):
+    def test_each_lane_has_a_primary_domain_scoped_query(self):
+        for lane, queries in LANE_QUERIES.items():
+            self.assertTrue(
+                any(
+                    "site:" in query
+                    and not query.startswith("site:www.donvitocodes.com/ai-news ")
+                    for query in queries
+                ),
+                lane.value,
+            )
+
+    def test_each_lane_has_a_domain_scoped_don_vito_discovery_query(self):
+        lane_terms = {
+            Lane.X402_ACP: ("x402", "Agentic Commerce Protocol"),
+            Lane.GENIUS_ACT: ("GENIUS Act",),
+            Lane.STABLECOIN_VOLUME: ("stablecoin", "card network"),
+            Lane.STRIPE_OPENROUTER: ("Stripe", "OpenRouter"),
+        }
+        for lane, queries in LANE_QUERIES.items():
+            scoped_queries = [
+                query
+                for query in queries
+                if query.startswith("site:www.donvitocodes.com/ai-news ")
+            ]
+            self.assertEqual(len(scoped_queries), 1, lane.value)
+            self.assertGreater(len(queries), len(scoped_queries), lane.value)
+            for term in lane_terms[lane]:
+                self.assertIn(term.lower(), scoped_queries[0].lower(), lane.value)
+
+    def test_agent_commerce_search_avoids_ambiguous_acp_abbreviation(self):
+        query_text = " ".join(LANE_QUERIES[Lane.X402_ACP])
+        self.assertNotRegex(query_text, r"\bACP\b")
+        self.assertIn('"Agentic Commerce Protocol"', query_text)
 
 
 class CliDiagnosticsTests(unittest.TestCase):
@@ -560,8 +598,15 @@ class LocalPromptTests(unittest.TestCase):
         self.assertEqual(len(evidence["published_at"]), 48)
         self.assertEqual(len(evidence["excerpt"]), 400)
         self.assertLessEqual(len(captured["messages"][1]["content"]), 20_000)
-        self.assertIn("no summary field", captured["messages"][0]["content"])
-        self.assertIn("allowed_source_ids", captured["messages"][0]["content"])
+        system_prompt = captured["messages"][0]["content"]
+        self.assertIn("no summary field", system_prompt)
+        self.assertIn("allowed_source_ids", system_prompt)
+        self.assertIn("held_items for Hans's review", system_prompt)
+        self.assertNotIn("hve-cfo", system_prompt)
+        self.assertIn(
+            "Don Vito Codes AI News only as a secondary discovery source",
+            system_prompt,
+        )
         self.assertEqual(payload["allowed_source_ids"], [source.source_id])
         response_format = captured["response_format"]
         self.assertEqual(response_format["type"], "json_schema")
@@ -1062,14 +1107,35 @@ class EditorialPolicyTests(unittest.TestCase):
                 coverage_complete=True,
             )
 
-    def test_genius_act_source_is_automatically_held(self):
+    def test_neutral_genius_act_source_is_not_automatically_held(self):
         source = make_source(Lane.GENIUS_ACT)
+        claim = DraftClaim(
+            text="The source reports an implementation update.",
+            source_ids=[source.source_id],
+            uncertainty="The scope of the update is not established.",
+            why_it_matters="Hans can review the cited development.",
+        )
         draft = route_sensitive_sources(
-            DraftBrief(),
+            DraftBrief(claims=[claim]),
             [source],
         )
+        self.assertEqual(draft.held_items, [])
+        self.assertEqual(draft.claims, [claim])
+        validate_draft(draft, [source], coverage_complete=True)
+
+    def test_sensitive_genius_act_source_is_held_for_hans(self):
+        source = make_source(
+            Lane.GENIUS_ACT,
+            excerpt="This source contains a legal interpretation of the rule.",
+        )
+        draft = route_sensitive_sources(DraftBrief(), [source])
         self.assertEqual(len(draft.held_items), 1)
         self.assertIn(source.source_id, draft.held_items[0].source_ids)
+        self.assertEqual(
+            draft.held_items[0].title,
+            "Financial, legal, or tax items held for Hans's review",
+        )
+        self.assertIn("Hans's review", draft.held_items[0].reason)
         validate_draft(draft, [source], coverage_complete=True)
 
     def test_sensitive_routing_respects_held_source_limit(self):
@@ -1079,12 +1145,13 @@ class EditorialPolicyTests(unittest.TestCase):
         ]
         sensitive = make_source(
             Lane.GENIUS_ACT,
+            excerpt="This source contains a legal interpretation of the rule.",
             url="https://example.com/financial",
         )
         draft = DraftBrief(
             held_items=[
                 HeldItem(
-                    title="Financial, legal, or tax items held for review",
+                    title="Financial, legal, or tax items held for Hans's review",
                     source_ids=[source.source_id for source in sources],
                     reason="Held for human review.",
                 )
@@ -1116,6 +1183,17 @@ class _FakeFetcher:
             b"</article></body></html>"
         )
         return FetchedPage(url=url, html=html, content_type="text/html")
+
+
+class _DistinctFakeFetcher(_FakeFetcher):
+    def fetch(self, url: str) -> FetchedPage:
+        page = super().fetch(url)
+        marker = url.rsplit("/", 1)[-1]
+        html = page.html.replace(
+            b"</article>",
+            f"<p>Fixture record {marker}</p></article>".encode("ascii"),
+        )
+        return FetchedPage(url=url, html=html, content_type=page.content_type)
 
 
 class _OneFailureFetcher(_FakeFetcher):
@@ -1239,14 +1317,14 @@ class PipelineTests(unittest.TestCase):
             target_date = date.today()
             first = pipeline.run(target_date)
             self.assertTrue(first.coverage_complete)
-            self.assertEqual(first.source_count, len(LANE_QUERIES))
+            self.assertEqual(first.source_count, _TOTAL_SEARCH_QUERY_COUNT)
             first_text = first.brief_path.read_text(encoding="utf-8")
             self.assertIn("Baseline run", first_text)
             self.assertIn("not published", first_text)
 
             second = pipeline.run(target_date)
             self.assertTrue(second.coverage_complete)
-            self.assertEqual(second.source_count, len(LANE_QUERIES))
+            self.assertEqual(second.source_count, _TOTAL_SEARCH_QUERY_COUNT)
             second_text = second.brief_path.read_text(encoding="utf-8")
             self.assertIn("no material change", second_text.lower())
             self.assertIn("unchanged", second_text)
@@ -1272,7 +1350,7 @@ class PipelineTests(unittest.TestCase):
                 report = pipeline.run(date.today())
                 brief = report.brief_path.read_text(encoding="utf-8")
                 self.assertTrue(report.coverage_complete)
-                self.assertEqual(report.source_count, len(LANE_QUERIES))
+                self.assertEqual(report.source_count, _TOTAL_SEARCH_QUERY_COUNT)
                 self.assertIn(f"hailo:{diagnostic}", report.warnings)
                 self.assertIn(
                     f"unavailable; CPU path continued ({diagnostic})",
@@ -1305,7 +1383,7 @@ class PipelineTests(unittest.TestCase):
                 brief = report.brief_path.read_text(encoding="utf-8")
                 diagnostic = "inference:HailoRTException: error_code_42"
                 self.assertTrue(report.coverage_complete)
-                self.assertEqual(report.source_count, len(LANE_QUERIES))
+                self.assertEqual(report.source_count, _TOTAL_SEARCH_QUERY_COUNT)
                 self.assertIn(f"hailo:{diagnostic}", report.warnings)
                 self.assertIn(
                     f"unavailable; CPU path continued ({diagnostic})",
@@ -1347,7 +1425,7 @@ class PipelineTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_human_routed_sources_are_held_but_not_sent_for_claim_synthesis(self):
+    def test_neutral_genius_sources_are_available_for_claim_synthesis(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = Settings(data_dir=Path(directory))
             store = Store(settings.database_path)
@@ -1356,20 +1434,19 @@ class PipelineTests(unittest.TestCase):
                 settings,
                 store,
                 _FakeSearch(),
-                _FakeFetcher(),
+                _DistinctFakeFetcher(),
                 writer,
             )
             try:
                 report = pipeline.run(date.today())
                 self.assertTrue(report.coverage_complete)
-                self.assertEqual(report.source_count, len(LANE_QUERIES))
-                self.assertNotIn(
+                self.assertEqual(report.source_count, _TOTAL_SEARCH_QUERY_COUNT)
+                self.assertIn(
                     Lane.GENIUS_ACT,
                     {source.lane for source in writer.received_sources},
                 )
                 brief = report.brief_path.read_text(encoding="utf-8")
-                self.assertIn("Financial, legal, or tax items held for review", brief)
-                self.assertIn("Held for hve-cfo/Brian review", brief)
+                self.assertNotIn("held for Hans's review", brief)
             finally:
                 store.close()
 
