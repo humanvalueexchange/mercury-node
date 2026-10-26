@@ -74,8 +74,28 @@ service creation, repository creation, GitHub write, or timer enablement.
   HTTP 403 responses.
 - The Hailo diagnostics change propagates worker startup and inference failures
   as bounded, sanitized stage/type/detail fields in run warnings and the brief's
-  triage status. Offline tests cover error propagation and CPU fallback; the
-  actual Hailo runtime cause remains unverified on Mercury.
+  triage status. In the latest Mercury UAT, Hailo reached tag validation but
+  returned an unsupported relevance tag; the cause is now more specific than
+  the prior generic worker error, but Hailo triage remains unavailable.
+- The latest full non-publishing UAT (2026-10-25, run
+  `cf6d83eb67534b8183667d6d68188793`) used the current `main` runtime files,
+  including Playwright retrieval and Hailo diagnostics, in a fresh isolated
+  data directory. All four Brave searches succeeded (5, 5, 4, and 4 results),
+  but only 9 of 18 results were fetched. Fetch failures were: GENIUS Act, two
+  `unsafe_request` and one HTTP 403; stablecoin/card-volume, four HTTP 403;
+  Stripe/OpenRouter, one `unsafe_request` and one `response_too_large`.
+  Failure records retain lane and category, not failed URLs. The run completed
+  with incomplete coverage and CLI exit code 2.
+- The run produced a local baseline brief from 9 sources. Citation and policy
+  validation passed, publishing was not requested, and no GitHub commit or
+  publication occurred. A first-pass review of the stored excerpts found all
+  9 sources were secondary and the 7 generated claims were not editorially
+  acceptable: the stablecoin/card-volume claim relied on a 2017 Wikipedia
+  entry, and the Stripe/OpenRouter lane included unrelated material. The two
+  GENIUS Act items were correctly held for hve-cfo/Brian review. The draft is
+  not publishable; a passing policy gate does not establish factual support or
+  usefulness. CPU generation averaged about 1.75 tokens/s and the run took
+  11m22s; this is not sustained resource or thermal validation.
 - No recurring job or GitHub publication is enabled. Publication remains
   blocked until the private target repository and scoped credentials are
   provisioned and separately approved.
