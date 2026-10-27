@@ -1,7 +1,13 @@
 # Mercury x402 Watch: Local Research and Publishing Design
 
-- **Status:** Implementation candidate; local Pi proof-of-fit and UAT remain
-  pending. No recurring timer or GitHub publication is enabled.
+> **Historical platform design (2026-10-27):** This document describes an
+> earlier Raspberry Pi 5/Hailo-10H candidate. The active target is DGX Spark
+> with Hermes in HVE-Librarian. Treat the Pi-specific models, 32K CPU
+> configuration, Hailo, paths, and service instructions below as historical,
+> not as Spark setup guidance. See the [Spark/Hermes handoff](x402-watch-spark-hermes-handoff.md).
+
+- **Status:** Historical Pi/Hailo candidate; superseded as the active deployment
+  target on 2026-10-27. No recurring timer or GitHub publication is enabled.
 - **Date:** 2026-10-24
 - **Implementation repository:** `humanvalueexchange/mercury-node`
 - **Brief repository:** `HansHWestphal/x402-watch` (target, private, not yet

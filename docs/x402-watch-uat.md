@@ -1,10 +1,15 @@
-# x402 Watch UAT and Deployment Gate
+# x402 Watch Historical UAT Record and Deployment Gate
 
-This is the implementation runbook for the local candidate in
-`humanvalueexchange/mercury-node`. It does not authorize a host installation,
-service creation, repository creation, GitHub write, or timer enablement.
+> **Historical Pi UAT:** These results and steps document the earlier
+> Raspberry Pi/Hailo prototype. The active target is DGX Spark with Hermes in
+> HVE-Librarian; this is not a Spark runbook. See the
+> [Spark/Hermes handoff](x402-watch-spark-hermes-handoff.md).
 
-## Current state
+This records UAT of the local prototype in `humanvalueexchange/mercury-node`.
+It does not authorize a host installation, service creation, repository
+creation, GitHub write, or timer enablement.
+
+## Prototype state at the last UAT
 
 - Application code, offline tests, and disabled systemd templates are in this
   repository.
@@ -120,7 +125,7 @@ service creation, repository creation, GitHub write, or timer enablement.
   minimal child environment is not a hard credential/filesystem boundary;
   separate identity and network isolation remain deployment hardening gates.
 
-## UAT sequence
+## Historical Pi UAT sequence
 
 1. **Review staged code on `main` and any follow-up branch.** Run the repository
    tests and lint before any Pi installation. Tests use local fakes and do not
@@ -178,7 +183,7 @@ service creation, repository creation, GitHub write, or timer enablement.
    time, install the service files, and enable the timer only after explicit
    approval. The provided timer is not enabled.
 
-## Local command contracts
+## Historical prototype command contracts
 
 The application CLI is available as:
 
@@ -199,7 +204,7 @@ future-dated runs are rejected.
 `--skip-hailo` for CPU-only validation or `--skip-cpu` for Hailo-only
 validation; Hailo-only mode does not require or start the llama.cpp server.
 
-## Acceptance gates
+## Pi prototype acceptance gates (not Spark gates)
 
 - All offline tests and Ruff checks pass.
 - CPU inference uses the downloaded Q4_K_M model at native 32K context, one
